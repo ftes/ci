@@ -163,6 +163,15 @@ defmodule ReleaseScript.EditTest do
              """
     end
 
+    test "bump_snippets/3 applies every rule for a file to the same content" do
+      readme = ~s({:playwright, "~> 1.0.0", hex: :playwright_ex}\n{:other, "~> 1.0.0"}\n)
+      snippets = [{"README.md", snippet()}, {"README.md", ~r/\{:other, "~> ([^"]+)"/}]
+
+      assert Edit.bump_snippets(snippets, %{"README.md" => readme}, "1.1.0") == [
+               {"README.md", readme, String.replace(readme, "1.0.0", "1.1.0")}
+             ]
+    end
+
     test "requirement/2 takes major.minor.0 for a final version, the full one for a prerelease" do
       assert Edit.requirement("1.65.0", true) == "1.65.0"
       assert Edit.requirement("1.65.3", true) == "1.65.0"

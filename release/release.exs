@@ -97,6 +97,14 @@ defmodule ReleaseScript.Edit do
   # A function, not an attribute: OTP 28 can't store a compiled regex in one.
   defp version_regex, do: ~r/^  @version "([^"]+)"$/m
 
+  # `{path, old, new}` per file: a file with several rules gets each on the previous one's result.
+  def bump_snippets(snippets, contents, requirement) do
+    for {path, regexes} <- Enum.group_by(snippets, &elem(&1, 0), &elem(&1, 1)) do
+      content = Map.fetch!(contents, path)
+      {path, content, Enum.reduce(regexes, content, &bump_snippet(path, &2, &1, requirement))}
+    end
+  end
+
   # A configured snippet that matches nothing is a stale config: abort, naming the file.
   def bump_snippet(path, content, regex, version) do
     bump(content, regex, version)
@@ -341,17 +349,17 @@ defmodule ReleaseScript do
     released = release_changelog(c, changelog, version)
     next = Edit.start_next(released, cl, version)
 
+    # A file with several rules gets them all, each on the previous one's result.
     files =
       [
         {"mix.exs", mix_exs, Edit.set_version(mix_exs, version)},
         {"CHANGELOG.md", changelog, released}
       ] ++
-        for {path, regex} <- c.snippets do
-          content = read!(path)
-
-          {path, content,
-           Edit.bump_snippet(path, content, regex, Edit.requirement(version, c.minor_requirement))}
-        end
+        Edit.bump_snippets(
+          c.snippets,
+          Map.new(c.snippets, fn {path, _} -> {path, read!(path)} end),
+          Edit.requirement(version, c.minor_requirement)
+        )
 
     if dry_run?,
       do: print_edits(c, version, files, released, next),
