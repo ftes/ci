@@ -20,7 +20,7 @@ inputs:
     default: ""
   mise-version:
     description: The mise version to install
-    default: "2026.8.14"
+    default: "2026.11.12"
 
 runs:
   using: composite
