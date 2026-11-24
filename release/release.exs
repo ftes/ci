@@ -1,618 +1,185 @@
-# Releases a Hex library: `scripts/release [--dry-run] <version>` in the library's repo, from a jj
-# working copy. It commits "Release <version>" (`@version`, the configured snippets and the dated
-# changelog heading) and "Start the next release", pushes them to the branch and tags the first
-# with `gh api`; the tag starts the repo's CI, whose publish job releases to Hex once it passed. A tag pushed
-# with GITHUB_TOKEN starts no workflow and only an admin can push the branch, so it runs locally.
+#!/usr/bin/env elixir
+# Releases one of ftes's Hex libraries:
 #
-# Self-contained and run with `elixir`, not `mix run`. Each repo's `scripts/release` fetches this
-# file at a pinned commit of ftes/ci (Renovate bumps it) and loads the repo's
-# `scripts/release_config.exs` first, which defines `ReleaseScript.Config.config/0` returning:
+#     release/release.exs <repo> [--dry-run] <version>    e.g. release/release.exs fluffy 0.9.0
 #
-#   repo:        owner/repo for `gh`
-#   remote:      the jj remote to fetch from and push to (only names it: `gh` uses `repo`)
-#   branch:      the branch to release from and push to
-#   workflow:    the workflow file a pushed `v*` tag starts
-#   hex_package: the package name, for the hex.pm link
-#   snippets:    `[{path, regex}]`, the version requirements to bump besides `@version` in
-#                mix.exs: each regex's one group is the requirement, each file must match
-#   driver_line: adds the release's `Drives [Playwright …]` line from DRIVER_VERSION and
-#                NODE_VERSION
-#   driver_minor: requires DRIVER_VERSION's major.minor to be the release's
-#   minor_requirement: a final version's snippets require `major.minor.0` (`~>` then takes the
-#                patches), a prerelease's the full version; else always the full version
-#   changelog:   a map:
-#     unreleased:  the heading entries go under until a release renames it
-#     version_prefix, version_suffix: around the version in a release's heading; with it they
-#                  find the release's section
-#     date_separator: between that and the release's ISO date
-#     reopen_prereleases: "Start the next release" renames a prerelease's heading back to
-#                  Unreleased, which then gathers every change since the last final release.
-#                  Otherwise, and after a final release, it adds an empty Unreleased above it.
-#     rc_only:     the marker of entries a final release must drop first
+# Works in a fresh clone in a temporary directory (`gh repo clone`, so your protocol and
+# credentials), never in your checkouts. Commits "Release <version>" and "Start the next
+# release" with jj, prints them, then pushes main and tags the first; the tag runs the repo's CI,
+# whose publish job releases to Hex. --dry-run stops before the push. Any problem raises.
 #
-# `scripts/release --check` checks the config against the repo, without jj or gh: CI runs it, so
-# a Renovate bump of this file is tested against each repo's config before it merges.
+# Conventions instead of per-repo config:
+#   - mix.exs has `@version "…"` and `app: :name`.
+#   - Install lines `{:name, "~> <current requirement>"` in Markdown files are bumped; at least
+#     one must exist. CHANGELOG.md and upgrade guides (upgrading*.md) are left alone. A final
+#     version is required as `~> major.minor.0`, a prerelease as itself.
+#   - CHANGELOG.md has `## [Unreleased]` or `## Unreleased`; a release heading copies the latest
+#     one's date separator (`## [1.2.3] 2026-11-24`, `## 1.2.3 — 2026-11-24`). Unreleased gathers
+#     everything since the last final release: a prerelease's heading goes back to Unreleased
+#     after it, a final release gets an empty Unreleased above it. A final release refuses
+#     `RC only:` entries and leftover `<version>-…` sections.
+#   - With DRIVER_VERSION (playwright_ex), the version's major.minor must be the driver's, and
+#     Unreleased's `Drives [Playwright …]` line is set from DRIVER_VERSION and NODE_VERSION.
 
-defmodule ReleaseScript.Error do
-  defexception [:message]
-end
+defmodule Release do
+  def main(argv) do
+    {repo, version, dry_run?} =
+      case OptionParser.parse(argv, strict: [dry_run: :boolean]) do
+        {opts, [repo, version], []} -> {repo, version, opts[:dry_run] == true}
+        _ -> raise "usage: release/release.exs <repo> [--dry-run] <version>"
+      end
 
-defmodule ReleaseScript.Edit do
-  @moduledoc false
-  # The release's checks and file edits: pure, string in, string out.
+    repo = if repo =~ "/", do: repo, else: "ftes/" <> repo
+    v = Version.parse!(version)
+    if v.build, do: raise("Hex refuses build metadata: #{version}")
+    final? = v.pre == []
+    tag = "v#{version}"
 
-  alias ReleaseScript.Error
+    tags = sh!("gh", ["api", "repos/#{repo}/git/matching-refs/tags/#{tag}", "--jq", ".[].ref"])
+    if "refs/tags/#{tag}" in String.split(tags), do: raise("#{tag} exists on GitHub")
 
-  def parse_version(version) do
-    case Version.parse(version) do
-      # Hex refuses build metadata, and only once the release commit and tag are pushed.
-      {:ok, %Version{build: nil}} ->
-        version
+    dir = Path.join(System.tmp_dir!(), "release-#{Path.basename(repo)}-#{System.os_time()}")
+    sh!("gh", ["repo", "clone", repo, dir, "--", "--quiet"])
+    File.cd!(dir)
+    sh!("jj", ["git", "init", "--colocate"])
 
-      _ ->
-        raise Error,
-              "#{inspect(version)} is not a SemVer version (1.2.3 or 1.2.3-rc.1, no v or +build)"
+    # mix.exs
+    mix_exs = File.read!("mix.exs")
+
+    [_, current] =
+      Regex.run(~r/^  @version "([^"]+)"$/m, mix_exs) || raise("no @version in mix.exs")
+
+    [_, app] = Regex.run(~r/\bapp: :(\w+)/, mix_exs) || raise("no `app: :name` in mix.exs")
+
+    if Version.compare(version, current) != :gt,
+      do: raise("#{version} isn't greater than @version #{current}")
+
+    File.write!(
+      "mix.exs",
+      String.replace(mix_exs, ~s(@version "#{current}"), ~s(@version "#{version}"))
+    )
+
+    # Install lines
+    install = ~r/(\{:#{app},\s*"~> )#{Regex.escape(requirement(current))}"/
+
+    bumped =
+      for path <- Path.wildcard("**/*.md"),
+          path != "CHANGELOG.md" and not String.starts_with?(Path.basename(path), "upgrading"),
+          (content = File.read!(path)) =~ install do
+        # A function, not "\\1…": a version's leading digit would extend the group number.
+        bump = fn _, head -> head <> requirement(version) <> ~s(") end
+        File.write!(path, Regex.replace(install, content, bump))
+      end
+
+    if bumped == [],
+      do: raise(~s(no `{:#{app}, "~> #{requirement(current)}"` install line in *.md))
+
+    # CHANGELOG.md
+    changelog = File.read!("CHANGELOG.md")
+    brackets? = changelog =~ ~r/^## \[Unreleased\]$/m
+    unreleased = if brackets?, do: "## [Unreleased]", else: "## Unreleased"
+    heading = if brackets?, do: "## [#{version}]", else: "## #{version}"
+
+    separator =
+      case Regex.run(~r/^## \[?\d+\.\d+\.\d+[^\s\]]*\]?( — | )\d{4}-\d\d-\d\d$/m, changelog) do
+        [_, separator] -> separator
+        nil -> " "
+      end
+
+    section = ~r/^#{Regex.escape(unreleased)}\n(.*?)(?=^## |\z)/ms
+
+    [{start, length}, {body_start, body_length}] =
+      Regex.run(section, changelog, return: :index) || raise("no `#{unreleased}` in CHANGELOG.md")
+
+    body = binary_part(changelog, body_start, body_length)
+    below = binary_part(changelog, start + length, byte_size(changelog) - start - length)
+    if String.trim(body) == "", do: raise("`#{unreleased}` is empty")
+
+    if final? and (body =~ "RC only:" or changelog =~ ~r/^## \[?#{Regex.escape(version)}-/m),
+      do: raise("a final release: merge the RC sections into Unreleased, drop `RC only:` entries")
+
+    body =
+      if File.exists?("DRIVER_VERSION") do
+        driver = String.trim(File.read!("DRIVER_VERSION"))
+        node = String.trim(File.read!("NODE_VERSION"))
+        d = Version.parse!(driver)
+
+        if {d.major, d.minor} != {v.major, v.minor},
+          do: raise("DRIVER_VERSION #{driver} isn't #{version}'s major.minor")
+
+        previous = Regex.run(~r/Drives \[Playwright ([^\]]+)\]/, below, capture: :all_but_first)
+        same = if previous == [driver], do: " No upstream API changes.", else: ""
+        url = "https://github.com/microsoft/playwright/releases/tag/v#{driver}"
+        line = "Drives [Playwright #{driver}](#{url}), on\nNode #{node}.#{same}"
+
+        if body =~ "Drives [Playwright ",
+          do: Regex.replace(~r/Drives \[Playwright .*?(?=\n\n)/s, body, line, global: false),
+          else: "\n" <> line <> "\n" <> body
+      else
+        body
+      end
+
+    {date, _} = :calendar.local_time()
+    release_heading = "#{heading}#{separator}#{Date.to_iso8601(Date.from_erl!(date))}"
+    above = binary_part(changelog, 0, start)
+    released = above <> release_heading <> "\n" <> body <> below
+
+    # A prerelease's entries stay in Unreleased; a final release starts an empty one.
+    next =
+      if final?,
+        do: above <> unreleased <> "\n\n" <> release_heading <> "\n" <> body <> below,
+        else: above <> unreleased <> "\n" <> body <> below
+
+    File.write!("CHANGELOG.md", released)
+    sh!("jj", ["commit", "-m", "Release #{version}"])
+    File.write!("CHANGELOG.md", next)
+    sh!("jj", ["commit", "-m", "Start the next release"])
+    IO.puts(sh!("jj", ["log", "--git", "--no-graph", "-r", "main@origin..@-"]))
+
+    if dry_run? do
+      IO.puts("\nDry run: nothing pushed. The commits are in #{dir}.")
+    else
+      sh!("jj", ["bookmark", "track", "main", "--remote", "origin"])
+      sh!("jj", ["bookmark", "set", "main", "-r", "@-"])
+      sh!("jj", ["git", "push", "-b", "main"])
+      # Read after the push: signing on push rewrites the commits.
+      sha = sh!("jj", ["log", "--no-graph", "-r", "main@origin-", "-T", "commit_id"])
+
+      sh!("gh", [
+        "api",
+        "repos/#{repo}/git/refs",
+        "-f",
+        "ref=refs/tags/#{tag}",
+        "-f",
+        "sha=#{sha}"
+      ])
+
+      IO.puts("""
+
+      Released #{tag} (#{sha}). CI publishes it: https://github.com/#{repo}/actions
+      Approve the staged release on hex.pm when its publish job waits.\
+      """)
     end
   end
 
-  def newer?(version, current), do: Version.compare(version, current) == :gt
-
-  # A final version whose prereleases still have their own sections: their entries would be
-  # missing from its release notes.
-  def rc_sections?(changelog, cl, version) do
-    Version.parse!(version).pre == [] and
-      changelog =~ ~r/^#{Regex.escape(cl.version_prefix <> version)}-/m
-  end
-
-  # A final version whose Unreleased entries still carry the RC-only marker.
-  def rc_only_entries?(changelog, cl, version) do
-    {_, body_start, body_end} = section!(changelog, cl.unreleased)
-
-    Version.parse!(version).pre == [] and
-      binary_part(changelog, body_start, body_end - body_start) =~ cl.rc_only
-  end
-
-  # The version the snippets require.
-  def requirement(version, minor?) do
+  # `~> major.minor.0` takes a final version's patches; a prerelease is required as itself.
+  defp requirement(version) do
     case Version.parse!(version) do
-      %Version{major: major, minor: minor, pre: []} when minor? -> "#{major}.#{minor}.0"
+      %{pre: []} = v -> "#{v.major}.#{v.minor}.0"
       _ -> version
     end
   end
 
-  def same_minor?(version, driver) do
-    %Version{major: major, minor: minor} = Version.parse!(version)
-    match?({:ok, %Version{major: ^major, minor: ^minor}}, Version.parse(driver))
-  end
-
-  def current_version(mix_exs) do
-    case Regex.run(version_regex(), mix_exs, capture: :all_but_first) do
-      [version] -> version
-      nil -> raise Error, ~s(no `  @version "..."` line in mix.exs)
-    end
-  end
-
-  def set_version(mix_exs, version), do: bump(mix_exs, version_regex(), version)
-
-  # A function, not an attribute: OTP 28 can't store a compiled regex in one.
-  defp version_regex, do: ~r/^  @version "([^"]+)"$/m
-
-  # `{path, old, new}` per file: a file with several rules gets each on the previous one's result.
-  def bump_snippets(snippets, contents, requirement) do
-    for {path, regexes} <- Enum.group_by(snippets, &elem(&1, 0), &elem(&1, 1)) do
-      content = Map.fetch!(contents, path)
-      {path, content, Enum.reduce(regexes, content, &bump_snippet(path, &2, &1, requirement))}
-    end
-  end
-
-  # A configured snippet that matches nothing is a stale config: abort, naming the file.
-  def bump_snippet(path, content, regex, version) do
-    bump(content, regex, version)
-  rescue
-    error in Error ->
-      reraise Error, "#{path}: #{error.message} (the release config's snippets)", __STACKTRACE__
-  end
-
-  # Replaces each match's group with the version.
-  def bump(content, regex, version) do
-    case Regex.scan(regex, content, return: :index, capture: :all_but_first) do
-      [] ->
-        raise Error, "no match for ~r/#{Regex.source(regex)}/"
-
-      matches ->
-        matches
-        |> Enum.reverse()
-        |> Enum.reduce(content, fn [{start, length}], acc ->
-          binary_part(acc, 0, start) <>
-            version <> binary_part(acc, start + length, byte_size(acc) - start - length)
-        end)
-    end
-  end
-
-  def unreleased_content?(changelog, cl) do
-    {_, body_start, body_end} = section!(changelog, cl.unreleased)
-    String.trim(binary_part(changelog, body_start, body_end - body_start)) != ""
-  end
-
-  def release_heading(changelog, cl, version, date) do
-    {start, body_start, _} = section!(changelog, cl.unreleased)
-
-    splice(
-      changelog,
-      start,
-      body_start,
-      heading(cl, version) <> cl.date_separator <> Date.to_iso8601(date)
-    )
-  end
-
-  def heading?(changelog, heading), do: changelog =~ ~r/^#{Regex.escape(heading)}( .*)?$/m
-
-  # The start of a release's heading, before its date.
-  def heading(cl, version), do: cl.version_prefix <> version <> cl.version_suffix
-
-  # Starts the version's section with the driver line, unless it has one. "No upstream API
-  # changes." when the previous release drove the same Playwright.
-  def driver_line(changelog, cl, version, driver, node) do
-    {_, body_start, body_end} = section!(changelog, heading(cl, version))
-    body = binary_part(changelog, body_start, body_end - body_start)
-
-    if body =~ "Drives [Playwright " do
-      changelog
-    else
-      same? = previous_driver(changelog, cl, body_end) == driver
-
-      line =
-        "Drives [Playwright #{driver}](https://github.com/microsoft/playwright/releases/tag/v#{driver}), on\n" <>
-          "Node #{node}." <> if(same?, do: " No upstream API changes.", else: "")
-
-      splice(
-        changelog,
-        body_start,
-        body_end,
-        "\n\n" <> line <> "\n\n" <> String.trim_leading(body, "\n")
-      )
-    end
-  end
-
-  # The version's heading back to Unreleased, for a prerelease with `reopen_prereleases`; else an
-  # empty Unreleased above the version's section.
-  def start_next(changelog, cl, version) do
-    {start, body_start, _} = section!(changelog, heading(cl, version))
-
-    if cl.reopen_prereleases and Version.parse!(version).pre != [] do
-      splice(changelog, start, body_start, cl.unreleased)
-    else
-      splice(changelog, start, start, cl.unreleased <> "\n\n")
-    end
-  end
-
-  defp previous_driver(changelog, cl, from) do
-    rest = binary_part(changelog, from, byte_size(changelog) - from)
-
-    with [{start, _} | _] <-
-           Regex.run(~r/^#{Regex.escape(cl.version_prefix)}/m, rest, return: :index),
-         {_, body_start, body_end} = section_at(rest, start),
-         [driver] <-
-           Regex.run(
-             ~r/Drives \[Playwright ([^\]]+)\]/,
-             binary_part(rest, body_start, body_end - body_start),
-             capture: :all_but_first
-           ) do
-      driver
-    else
-      _ -> nil
-    end
-  end
-
-  # The section whose heading is `heading`, or starts with `heading` and a space: the heading's
-  # start, the body's start (the heading line's end) and the body's end (the next `## ` heading).
-  defp section!(changelog, heading) do
-    regex = ~r/^#{Regex.escape(heading)}( .*)?$/m
-
-    case Regex.scan(regex, changelog, return: :index, capture: :first) do
-      [[{start, _}]] -> section_at(changelog, start)
-      [] -> raise Error, "no `#{heading}` heading in the changelog"
-      _ -> raise Error, "more than one `#{heading}` heading in the changelog"
-    end
-  end
-
-  defp section_at(text, start) do
-    body_start =
-      case :binary.match(text, "\n", scope: {start, byte_size(text) - start}) do
-        {line_end, _} -> line_end
-        :nomatch -> byte_size(text)
-      end
-
-    rest = binary_part(text, body_start, byte_size(text) - body_start)
-
-    case Regex.run(~r/^## /m, rest, return: :index) do
-      [{next, _}] -> {start, body_start, body_start + next}
-      nil -> {start, body_start, byte_size(text)}
-    end
-  end
-
-  defp splice(text, from, to, insert),
-    do: binary_part(text, 0, from) <> insert <> binary_part(text, to, byte_size(text) - to)
-end
-
-defmodule ReleaseScript do
-  @moduledoc false
-  # The command line: guards, then the edits, two jj commits, the push and the tag.
-
-  alias ReleaseScript.{Config, Edit, Error}
-
-  @usage """
-  Usage: scripts/release [--dry-run] <version>
-         scripts/release --check
-
-    --dry-run  run the checks and print the release's edits; changes and pushes nothing
-    --check    check the release config against the repo (snippets, @version, changelog)
-  """
-
-  def main(argv) do
-    case command(argv) do
-      :help -> IO.write(@usage)
-      :usage -> abort(@usage)
-      :check -> check(config!())
-      {:release, version, dry_run?} -> release(version, dry_run?)
-    end
-  rescue
-    error in Error -> abort(error.message)
-  end
-
-  def command(argv) do
-    case OptionParser.parse(argv, strict: [dry_run: :boolean, check: :boolean, help: :boolean]) do
-      {[help: true], [], []} -> :help
-      {[check: true], [], []} -> :check
-      {[dry_run: true], [version], []} -> {:release, version, true}
-      {[], [version], []} -> {:release, version, false}
-      _ -> :usage
-    end
-  end
-
-  # The repo's config, with every key this script reads: a key added here fails a repo's config
-  # that lacks it by name, not halfway through a release.
-  def config!, do: validate!(Config.config())
-
-  @keys ~w(repo remote branch workflow hex_package snippets driver_line driver_minor minor_requirement
-           changelog)a
-  @changelog_keys ~w(unreleased version_prefix version_suffix date_separator reopen_prereleases rc_only)a
-
-  def validate!(c) do
-    missing =
-      Enum.reject(@keys, &Map.has_key?(c, &1)) ++
-        for key <- @changelog_keys,
-            not Map.has_key?(Map.get(c, :changelog, %{}), key),
-            do: :"changelog.#{key}"
-
-    if missing != [] do
-      raise Error,
-            "the release config (scripts/release_config.exs) lacks #{Enum.map_join(missing, ", ", &"`#{&1}`")}"
-    end
-
-    c
-  end
-
-  # What a release reads besides jj and gh: @version, each snippet, the changelog's headings (an
-  # Unreleased, or the current version's on a release commit) and the driver files.
-  def check(c) do
-    current = Edit.current_version(read!("mix.exs"))
-    for {path, regex} <- c.snippets, do: Edit.bump_snippet(path, read!(path), regex, current)
-
-    changelog = read!("CHANGELOG.md")
-    cl = c.changelog
-
-    unless Edit.heading?(changelog, cl.unreleased) or
-             Edit.heading?(changelog, Edit.heading(cl, current)) do
-      raise Error,
-            "CHANGELOG.md has neither `#{cl.unreleased}` nor `#{Edit.heading(cl, current)}` (the release config's changelog)"
-    end
-
-    if c.driver_line or c.driver_minor, do: read_version!("DRIVER_VERSION")
-    if c.driver_line, do: read_version!("NODE_VERSION")
-
-    IO.puts("The release config matches the repo (@version #{current}).")
-  end
-
-  defp release(version, dry_run?) do
-    c = config!()
-    version = Edit.parse_version(version)
-    target = "#{c.branch}@#{c.remote}"
-
-    # Not in a dry run: a fetch can abandon squash-merged work and move `@`.
-    if dry_run? do
-      step("Not fetching: checking against #{target} as last fetched")
-    else
-      step("Fetching #{c.remote}")
-      run!("jj", ["git", "fetch", "--remote", c.remote])
-    end
-
-    check_clean!(target)
-
-    changelog = read!("CHANGELOG.md")
-    mix_exs = read!("mix.exs")
-    current = Edit.current_version(mix_exs)
-
-    cl = c.changelog
-
-    unless Edit.unreleased_content?(changelog, cl),
-      do: raise(Error, "`#{cl.unreleased}` in CHANGELOG.md is empty")
-
-    unless Edit.newer?(version, current),
-      do: raise(Error, "#{version} isn't greater than @version #{current}")
-
-    check_rc!(c, changelog, version)
-    check_driver_minor!(c, version)
-
-    check_no_tag!(c.repo, "v#{version}")
-
-    released = release_changelog(c, changelog, version)
-    next = Edit.start_next(released, cl, version)
-
-    # A file with several rules gets them all, each on the previous one's result.
-    files =
-      [
-        {"mix.exs", mix_exs, Edit.set_version(mix_exs, version)},
-        {"CHANGELOG.md", changelog, released}
-      ] ++
-        Edit.bump_snippets(
-          c.snippets,
-          Map.new(c.snippets, fn {path, _} -> {path, read!(path)} end),
-          Edit.requirement(version, c.minor_requirement)
-        )
-
-    if dry_run?,
-      do: print_edits(c, version, files, released, next),
-      else: publish(c, version, files, next)
-  end
-
-  defp print_edits(c, version, files, released, next) do
-    step("Commit 1, \"Release #{version}\" (tagged v#{version})")
-    Enum.each(files, fn {path, old, new} -> IO.write(diff(path, old, new)) end)
-    step("Commit 2, \"Start the next release\"")
-    IO.write(diff("CHANGELOG.md", released, next))
-
-    IO.puts(
-      "\nDry run: nothing changed. Without --dry-run, this commits both, pushes #{c.branch} to " <>
-        "#{c.remote} and tags commit 1 v#{version} on GitHub."
-    )
-  end
-
-  defp release_changelog(c, changelog, version) do
-    released = Edit.release_heading(changelog, c.changelog, version, today())
-
-    if c.driver_line do
-      Edit.driver_line(
-        released,
-        c.changelog,
-        version,
-        read_version!("DRIVER_VERSION"),
-        read_version!("NODE_VERSION")
-      )
-    else
-      released
-    end
-  end
-
-  defp publish(c, version, files, next) do
-    target = "#{c.branch}@#{c.remote}"
-    op = capture!("jj", ["op", "log", "--no-graph", "-n", "1", "-T", "id.short(12)"])
-    undo = "Nothing is pushed: `jj op restore #{op}` undoes the release commits."
-
-    {release, start_next} =
-      or_hint(undo, fn ->
-        Enum.each(files, fn {path, _, new} -> File.write!(path, new) end)
-        run!("jj", ["commit", "-m", "Release #{version}"])
-        release = capture!("jj", ["log", "--no-graph", "-r", "@-", "-T", "change_id"])
-        File.write!("CHANGELOG.md", next)
-        run!("jj", ["commit", "-m", "Start the next release"])
-        {release, capture!("jj", ["log", "--no-graph", "-r", "@-", "-T", "change_id"])}
-      end)
-
-    check = "Check whether #{c.branch} reached #{c.remote} (`jj log -r #{target}`). "
-
-    or_hint(check <> undo, fn ->
-      run!("jj", ["bookmark", "track", c.branch, "--remote", c.remote])
-      push(c, start_next, "both commits")
-    end)
-
-    # After the push: signing on push rewrites the commits, so their ids are only final now.
-    sha =
-      capture!("jj", ["log", "--no-graph", "-r", "#{release} & ::#{target}", "-T", "commit_id"])
-
-    if sha == "",
-      do: raise(Error, "the release commit #{release} isn't on #{target}; not tagging")
-
-    tag = "v#{version}"
-
-    or_hint(
-      "#{c.branch} is pushed. Tag the release commit with `gh api repos/#{c.repo}/git/refs -f ref=refs/tags/#{tag} -f sha=#{sha}`.",
-      fn ->
-        step("Tagging #{String.slice(sha, 0, 12)} #{tag}")
-
-        capture!("gh", [
-          "api",
-          "repos/#{c.repo}/git/refs",
-          "-f",
-          "ref=refs/tags/#{tag}",
-          "-f",
-          "sha=#{sha}"
-        ])
-      end
-    )
-
-    step("Released #{tag}")
-    IO.puts("Release run: #{run_url(c, tag)}")
-
-    IO.puts(
-      "Approve the staged release on hex.pm (https://hex.pm/packages/#{c.hex_package}) when the run waits for it."
-    )
-  end
-
-  defp push(c, change, what) do
-    step("Pushing #{what} to #{c.branch} on #{c.remote}")
-    run!("jj", ["bookmark", "set", c.branch, "-r", change])
-    run!("jj", ["git", "push", "--remote", c.remote, "-b", c.branch])
-  end
-
-  defp check_clean!(target) do
-    empty? = capture!("jj", ["log", "--no-graph", "-r", "@", "-T", "empty"]) == "true"
-    parents = capture!("jj", ["log", "--no-graph", "-r", "@-", "-T", ~s(commit_id ++ "\\n")])
-    tip = capture!("jj", ["log", "--no-graph", "-r", target, "-T", "commit_id"])
-
-    unless empty? and String.split(parents) == [tip] do
-      raise Error,
-            "the working copy isn't clean: release from an empty @ on #{target} (`jj new #{target}`)"
-    end
-  end
-
-  defp check_rc!(c, changelog, version) do
-    cl = c.changelog
-
-    if Edit.rc_sections?(changelog, cl, version) or Edit.rc_only_entries?(changelog, cl, version) do
-      raise Error,
-            "CHANGELOG.md still has `#{cl.version_prefix}#{version}-…` sections or `#{cl.rc_only}` entries: for the first " <>
-              "non-RC release, merge them into `#{cl.unreleased}` first" <>
-              if(c.driver_line, do: " (keeping the latest `Drives` line)", else: "") <>
-              " and drop the `#{cl.rc_only}` entries"
-    end
-  end
-
-  defp check_driver_minor!(c, version) do
-    if c.driver_minor do
-      driver = read_version!("DRIVER_VERSION")
-
-      unless Edit.same_minor?(version, driver),
-        do: raise(Error, "DRIVER_VERSION #{driver} isn't #{version}'s major.minor")
-    end
-  end
-
-  defp check_no_tag!(repo, tag) do
-    refs =
-      capture!("gh", ["api", "repos/#{repo}/git/matching-refs/tags/#{tag}", "--jq", ".[].ref"])
-
-    if "refs/tags/#{tag}" in String.split(refs),
-      do: raise(Error, "the tag #{tag} exists on GitHub")
-  end
-
-  defp read!(path) do
-    case File.read(path) do
-      {:ok, content} -> content
-      {:error, reason} -> raise Error, "can't read #{path}: #{:file.format_error(reason)}"
-    end
-  end
-
-  defp read_version!(path), do: path |> read!() |> String.trim()
-
-  # The run the tag started: it can take a few seconds to show up.
-  defp run_url(c, tag, attempts \\ 10) do
-    workflow_url = "https://github.com/#{c.repo}/actions/workflows/#{c.workflow}"
-
-    url =
-      try_capture("gh", [
-        "run",
-        "list",
-        "--repo",
-        c.repo,
-        "--workflow",
-        c.workflow,
-        "--branch",
-        tag,
-        "--limit",
-        "1",
-        "--json",
-        "url",
-        "--jq",
-        ".[].url"
-      ])
-
-    cond do
-      url == :error ->
-        "couldn't list the runs, see #{workflow_url}"
-
-      url != "" ->
-        url
-
-      attempts > 1 ->
-        Process.sleep(3_000)
-        run_url(c, tag, attempts - 1)
-
-      true ->
-        "not listed yet, see #{workflow_url}"
-    end
-  end
-
-  # A unified diff of the changed lines, with two lines of context.
-  defp diff(path, old, new) do
-    chunks = List.myers_difference(String.split(old, "\n"), String.split(new, "\n"))
-    last = length(chunks) - 1
-
-    lines =
-      chunks
-      |> Enum.with_index()
-      |> Enum.flat_map(fn
-        {{:eq, lines}, i} -> context(lines, i == 0, i == last)
-        {{:del, lines}, _} -> Enum.map(lines, &("-" <> &1))
-        {{:ins, lines}, _} -> Enum.map(lines, &("+" <> &1))
-      end)
-
-    Enum.join(["--- a/#{path}", "+++ b/#{path}" | lines], "\n") <> "\n"
-  end
-
-  defp context(lines, first?, last?) do
-    head = if first?, do: [], else: Enum.take(lines, 2)
-    tail = if last?, do: [], else: Enum.take(lines, -2)
-
-    cond do
-      length(lines) <= length(head) + length(tail) -> Enum.map(lines, &(" " <> &1))
-      last? -> Enum.map(head, &(" " <> &1))
-      true -> Enum.map(head, &(" " <> &1)) ++ ["@@"] ++ Enum.map(tail, &(" " <> &1))
-    end
-  end
-
-  defp today do
-    {date, _} = :calendar.local_time()
-    Date.from_erl!(date)
-  end
-
-  # `env -u DEVELOPER_DIR`: a leaked one can keep jj and gh from finding git's tools.
-  defp run!(tool, args) do
-    case System.cmd("env", ["-u", "DEVELOPER_DIR", tool | args], into: IO.stream()) do
-      {_, 0} -> :ok
-      {_, status} -> raise Error, "`#{Enum.join([tool | args], " ")}` exited with #{status}"
-    end
-  end
-
-  # Once the tag exists, a failure only costs the run's URL.
-  defp try_capture(tool, args) do
-    capture!(tool, args)
-  rescue
-    Error -> :error
-  end
-
-  # `--color=never`: `ui.color = "always"` would put escapes in the ids and templates read here.
-  defp capture!(tool, args) do
-    args = if tool == "jj", do: ["--color=never" | args], else: args
+  # Raises on a non-zero exit; stderr goes to the terminal. `env -u DEVELOPER_DIR`: a leaked one
+  # keeps jj and gh from finding git's tools. `--color=never`: ids are read back; `--quiet`: no hints.
+  defp sh!(tool, args) do
+    args = if tool == "jj", do: ["--color=never", "--quiet" | args], else: args
 
     case System.cmd("env", ["-u", "DEVELOPER_DIR", tool | args]) do
-      {out, 0} ->
-        String.trim(out)
-
-      {out, status} ->
-        raise Error, "`#{Enum.join([tool | args], " ")}` exited with #{status}\n#{out}"
+      {out, 0} -> String.trim(out)
+      {out, status} -> raise "`#{Enum.join([tool | args], " ")}` exited with #{status}\n#{out}"
     end
   end
-
-  defp or_hint(hint, fun) do
-    fun.()
-  rescue
-    error -> reraise Error, Exception.message(error) <> "\n" <> hint, __STACKTRACE__
-  end
-
-  defp step(message), do: IO.puts(IO.ANSI.format([:bright, "==> ", message]))
-
-  defp abort(message) do
-    IO.puts(:stderr, "release: " <> String.trim_trailing(message))
-    System.halt(1)
-  end
 end
+
+Release.main(System.argv())
