@@ -1,5 +1,5 @@
 name: Set up Elixir
-description: Installs the repo's Erlang and Elixir with mise, restores deps and _build, and fetches and compiles the deps.
+description: Installs the repo's Erlang and Elixir with mise, restores deps and _build, and fetches and compiles the deps, failing if the lane's mix.lock is stale.
 
 # The caller saves the cache, from one job and on main only (a PR's cache would be visible to that
 # PR alone), after a step that proves the build:
@@ -57,6 +57,9 @@ runs:
             if [ -f mix.lock.oldest ]; then cp mix.lock.oldest mix.lock; fi ;;
           *) echo "::error::lane: newest or oldest, got: $LANE"; exit 1 ;;
         esac
+        # The lane's lock as committed, for the check after deps.get.
+        rm -f "$RUNNER_TEMP/setup-mix.lock"
+        if [ -f mix.lock ]; then cp mix.lock "$RUNNER_TEMP/setup-mix.lock"; fi
 
     # mise installs precompiled Erlang (builds.hex.pm) only on the Ubuntu runners it detects, up to
     # 24.04, and compiles it from source (~5 min) on newer ones. Drop once mise detects the runner.
@@ -104,9 +107,23 @@ runs:
           deps
           _build
 
+    # deps.get quietly re-resolves a lock that mix.exs no longer accepts, so the lock it leaves is
+    # compared with the committed one: CI runs what is locked, and an oldest lane every floor in
+    # mix.lock.oldest. A repo without a mix.lock skips the check.
     - name: Install dependencies
       shell: bash
+      env:
+        LANE: ${{ inputs.lane }}
       # Two commands, not `mix do ... + ...`: an oldest lane's Mix may predate the `+` separator.
       run: |
         mix deps.get
+        if [ -f "$RUNNER_TEMP/setup-mix.lock" ] && ! cmp -s mix.lock "$RUNNER_TEMP/setup-mix.lock"; then
+          diff "$RUNNER_TEMP/setup-mix.lock" mix.lock || true
+          if [ "$LANE" = oldest ] && [ -f mix.lock.oldest ]; then
+            echo "::error::mix.lock.oldest no longer meets mix.exs: move a floor in mix.exs and mix.lock.oldest together"
+          else
+            echo "::error::mix.lock no longer meets mix.exs: run mix deps.get and commit mix.lock"
+          fi
+          exit 1
+        fi
         mix deps.compile

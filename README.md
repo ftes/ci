@@ -6,7 +6,7 @@ per release and merges it once the repo's checks pass, so each repo's CI tests e
 
 | | |
 |---|---|
-| [`setup`](setup/action.yml) | Erlang (precompiled) and Elixir with mise, deps and `_build` from the cache, deps compiled |
+| [`setup`](setup/action.yml) | Erlang (precompiled) and Elixir with mise, deps and `_build` from the cache, deps compiled; fails on a stale `mix.lock` (`mix.lock.oldest` on the oldest lane) |
 | [`playwright-browser`](playwright-browser/action.yml) | the Playwright driver, a browser and its system packages, cached |
 | [`kamal-deploy`](kamal-deploy/action.yml) | Ruby and Kamal with mise, SSH with pinned host keys, `kamal deploy` |
 | [`elixir-image.yml`](.github/workflows/elixir-image.yml) | reusable: keeps the Dockerfile's hexpm/elixir image on the repo's toolchain |
