@@ -1,5 +1,6 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
-# CodeRabbit's PR review, the same in each of ftes's public repos: findings, not summaries.
+# CodeRabbit's PR review for ftes's public repos (the others point here with remote_config):
+# findings, not summaries.
 tone_instructions: Be concise. Report defects with a concrete failure scenario; label anything else a nitpick. Skip praise and restating the diff.
 reviews:
   profile: chill
@@ -13,6 +14,11 @@ reviews:
   related_prs: false
   suggested_labels: false
   suggested_reviewers: false
+  # PR title and description checks: notes on the PR, not on the code.
+  pre_merge_checks:
+    title: {mode: "off"}
+    description: {mode: "off"}
+    issue_assessment: {mode: "off"}
   auto_review:
     # Drafts wait until ready; any base branch, so a PR stacked on another gets reviewed.
     drafts: false
