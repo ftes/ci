@@ -1,5 +1,5 @@
 name: Set up Elixir
-description: Installs the repo's Erlang and Elixir with mise, restores deps and _build, and fetches and compiles the deps, failing if the lane's mix.lock is stale.
+description: Installs the repo's Erlang and Elixir with mise, restores deps and _build, and fetches and compiles the deps, failing if that changes the lane's mix.lock.
 
 # The caller saves the cache, from one job and on main only (a PR's cache would be visible to that
 # PR alone), after a step that proves the build:
@@ -107,9 +107,10 @@ runs:
           deps
           _build
 
-    # deps.get quietly re-resolves a lock that mix.exs no longer accepts, so the lock it leaves is
-    # compared with the committed one: CI runs what is locked, and an oldest lane every floor in
-    # mix.lock.oldest. A repo without a mix.lock skips the check.
+    # deps.get quietly re-resolves a lock that mix.exs no longer accepts, or adds a missing entry, so
+    # the lock it leaves is compared with the committed one: CI runs what is locked, and an oldest
+    # lane every floor in mix.lock.oldest. Entries mix.exs no longer uses stay, for
+    # `mix deps.unlock --check-unused`. A repo without a mix.lock skips the check.
     - name: Install dependencies
       shell: bash
       env:
@@ -120,9 +121,9 @@ runs:
         if [ -f "$RUNNER_TEMP/setup-mix.lock" ] && ! cmp -s mix.lock "$RUNNER_TEMP/setup-mix.lock"; then
           diff "$RUNNER_TEMP/setup-mix.lock" mix.lock || true
           if [ "$LANE" = oldest ] && [ -f mix.lock.oldest ]; then
-            echo "::error::mix.lock.oldest no longer meets mix.exs: move a floor in mix.exs and mix.lock.oldest together"
+            echo "::error::deps.get changed mix.lock.oldest (diff above): move a floor in mix.exs and mix.lock.oldest together, or regenerate it with this lane's Elixir"
           else
-            echo "::error::mix.lock no longer meets mix.exs: run mix deps.get and commit mix.lock"
+            echo "::error::deps.get changed mix.lock (diff above): run mix deps.get and commit mix.lock, or regenerate it with this lane's Elixir"
           fi
           exit 1
         fi

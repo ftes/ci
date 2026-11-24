@@ -28,8 +28,8 @@ jobs:
 
   # `setup` on the fixture project. Erlang must come precompiled: a cold install from source takes
   # ~5 min per job. The reinstall forbids compiling, so it fails if setup's precompiled OS is
-  # missing or has no build, even when mise's cache restored Erlang. Then setup must fail on a
-  # stale mix.lock.
+  # missing or has no build, even when mise's cache restored Erlang. Then setup must fail when
+  # deps.get changes mix.lock, and pass on a lock it leaves as is.
   setup:
     runs-on: ubuntu-26.04
     timeout-minutes: 10
@@ -55,7 +55,7 @@ jobs:
           [[ $ERLANG_BUILD =~ ^[0-9a-f]{12}$ ]]
           time mise install --force "erlang@$ERLANG"
 
-      # A dep the committed (empty) lock lacks: deps.get adds it, so the lock check fails.
+      # A dep the (empty) lock written below lacks: deps.get adds it, so the lock check fails.
       - name: Make mix.lock stale
         run: |
           sed -i 's/deps: \[\]/deps: [{:jason, "~> 1.4"}]/' mix.exs
@@ -63,10 +63,14 @@ jobs:
       - uses: ./setup # zizmor: ignore[self-repository]
         id: stale
         continue-on-error: true
-      # Failed at the check: deps.get ran and locked the dep.
+      # Failed at the check: deps.get ran and locked the dep, deps.compile never ran.
       - name: Expect the stale lock to fail setup
         env:
           OUTCOME: ${{ steps.stale.outcome }}
         run: |
           test "$OUTCOME" = failure
           grep -q '"jason"' mix.lock
+          test ! -d _build/test/lib/jason
+      # The lock deps.get just wrote is current, so setup passes and compiles the dep.
+      - uses: ./setup # zizmor: ignore[self-repository]
+      - run: test -d _build/test/lib/jason
