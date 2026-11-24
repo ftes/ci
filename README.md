@@ -25,4 +25,28 @@ Each file's header shows how to call it.
 - **Flat.** An action here can't call another one at its own commit, so callers compose them.
 - **Small.** A need of one repo is a step next to the shared one in that repo, not a new input.
 
+## Pull request CI
+
+Triggers and job conditions can't be shared, so each repo's CI copies these lines. Any base branch
+runs, so stacked PRs get CI; drafts, and PRs below the top of a GitHub stack (the top holds every
+change below it), skip their jobs. A required check that aggregates jobs (`needs:` with
+`if: always()`) puts the same condition on its step instead, so those PRs report it green.
+
+```yaml
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: ${{ !github.event.pull_request.draft && (github.event.pull_request.stack == null || github.event.pull_request.stack.position == github.event.pull_request.stack.size) }}
+```
+
+An app that deploys main's head keeps its push runs in one group instead (`github.ref` for
+`push` too, `cancel-in-progress` on PRs only), so pushes in between are dropped.
+
 Each push to main is tagged as the next patch release (`tag.yml`); tag a minor or major by hand.
