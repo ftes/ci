@@ -19,7 +19,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
         with:
-          version: "2026.8.14"
+          version: "2026.11.12"
       # actionlint checks the workflows; zizmor the workflows and actions, for security.
       - run: actionlint
       - run: zizmor --persona=regular --format=github .
