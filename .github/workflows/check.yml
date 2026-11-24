@@ -76,3 +76,20 @@ jobs:
       # The lock deps.get just wrote is current, so setup passes and compiles the dep.
       - uses: ./setup # zizmor: ignore[self-repository]
       - run: test -d _build/test/lib/jason
+
+  # The release script (release/): formatted, and it compiles (with no arguments it raises its
+  # usage). On the fixture project's toolchain, set up as in the setup job.
+  release:
+    runs-on: ubicloud-standard-2-ubuntu-2604
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: cp -R test/fixture/. .
+      - uses: ./setup # zizmor: ignore[self-repository]
+      - run: mix format --check-formatted
+      - run: |
+          release/release.exs 2>&1 | grep 'usage: release/release.exs'
