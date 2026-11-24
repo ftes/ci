@@ -15,7 +15,7 @@ inputs:
   # Pinned as a workaround for mise.jdx.dev/VERSION racing GitHub release assets. Renovate bumps it.
   mise-version:
     description: The mise version to install
-    default: "2026.8.14"
+    default: "2026.11.12"
 
 outputs:
   erlang:
@@ -54,6 +54,16 @@ runs:
             if [ -f mix.lock.oldest ]; then cp mix.lock.oldest mix.lock; fi ;;
           *) echo "::error::lane: newest or oldest, got: $LANE"; exit 1 ;;
         esac
+
+    # mise installs precompiled Erlang (builds.hex.pm) only on the Ubuntu runners it detects, up to
+    # 24.04, and compiles it from source (~5 min) on newer ones. Drop once mise detects the runner.
+    - name: Use precompiled Erlang
+      shell: bash
+      # The value is the runner's ImageOS digits, nothing a caller or PR controls.
+      run: | # zizmor: ignore[github-env]
+        if [ -z "${MISE_ERLANG_PRECOMPILED_OS:-}" ] && [[ "${ImageOS:-}" =~ ^ubuntu([0-9]{2})$ ]]; then
+          echo "MISE_ERLANG_PRECOMPILED_OS=ubuntu-${BASH_REMATCH[1]}.04" >> "$GITHUB_ENV"
+        fi
 
     # Only Erlang and Elixir: a mise.toml may list deploy tools (Ruby, Kamal) too.
     - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0

@@ -19,9 +19,35 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
         with:
-          version: "2026.8.14"
+          version: "2026.11.12"
       # actionlint checks the workflows; zizmor the workflows and actions, for security.
       - run: actionlint
       - run: zizmor --persona=regular --format=github .
         env:
           GH_TOKEN: ${{ github.token }}
+
+  # `setup` on the fixture project. Erlang must come precompiled: a cold install from source takes
+  # ~5 min per job. The reinstall forbids compiling, so it fails if setup's precompiled OS is
+  # missing or has no build, even when mise's cache restored Erlang.
+  setup:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # setup works on the repo root, so the fixture becomes it.
+      - run: cp -R test/fixture/. .
+      - uses: ./setup # zizmor: ignore[self-repository]
+        id: setup
+      - name: Reinstall Erlang, precompiled only
+        env:
+          MISE_ERLANG_COMPILE: "false"
+          ERLANG: ${{ steps.setup.outputs.erlang }}
+        run: |
+          echo "MISE_ERLANG_PRECOMPILED_OS=$MISE_ERLANG_PRECOMPILED_OS"
+          time mise install --force "erlang@$ERLANG"

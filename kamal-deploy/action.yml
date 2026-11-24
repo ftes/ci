@@ -20,35 +20,14 @@ inputs:
     default: ""
   mise-version:
     description: The mise version to install
-    default: "2026.8.14"
+    default: "2026.11.12"
 
 runs:
   using: composite
   steps:
-    # Ruby, Kamal and KAMAL_HOST from the repo's mise.toml.
-    - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
-      with:
-        version: ${{ inputs.mise-version }}
-        install_args: ruby gem:kamal
-
-    - name: Configure SSH
-      shell: bash
-      env:
-        SSH_KEY: ${{ inputs.ssh-key }}
-        KNOWN_HOSTS: ${{ inputs.known-hosts }}
-      run: |
-        install -m 700 -d ~/.ssh
-        printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
-        chmod 600 ~/.ssh/id_ed25519
-        # Kamal's net-ssh reads both files, so its connections are checked too.
-        if [ -n "$KNOWN_HOSTS" ]; then
-          cp "$KNOWN_HOSTS" ~/.ssh/known_hosts
-          printf 'Host *\n  StrictHostKeyChecking yes\n' > ~/.ssh/config
-        fi
-
-    # A run whose commit the default branch has moved past skips the deploy: its CI can finish after
-    # a newer one's, or be re-run, and would ship an older image. The newer commit deploys after its
-    # own CI.
+    # A run whose commit the default branch has moved past skips the deploy, and installs nothing:
+    # its CI can finish after a newer one's, or be re-run, and would ship an older image. The newer
+    # commit deploys after its own CI.
     - name: Check this is the default branch's head
       id: head
       shell: bash
@@ -61,6 +40,29 @@ runs:
           echo "current=true" >> "$GITHUB_OUTPUT"
         else
           echo "::notice::Not deploying $GITHUB_SHA: $BRANCH is at $head, which deploys after its own CI"
+        fi
+
+    # Ruby, Kamal and KAMAL_HOST from the repo's mise.toml.
+    - if: steps.head.outputs.current == 'true'
+      uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+      with:
+        version: ${{ inputs.mise-version }}
+        install_args: ruby gem:kamal
+
+    - name: Configure SSH
+      if: steps.head.outputs.current == 'true'
+      shell: bash
+      env:
+        SSH_KEY: ${{ inputs.ssh-key }}
+        KNOWN_HOSTS: ${{ inputs.known-hosts }}
+      run: |
+        install -m 700 -d ~/.ssh
+        printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+        chmod 600 ~/.ssh/id_ed25519
+        # Kamal's net-ssh reads both files, so its connections are checked too.
+        if [ -n "$KNOWN_HOSTS" ]; then
+          cp "$KNOWN_HOSTS" ~/.ssh/known_hosts
+          printf 'Host *\n  StrictHostKeyChecking yes\n' > ~/.ssh/config
         fi
 
     - name: Deploy
