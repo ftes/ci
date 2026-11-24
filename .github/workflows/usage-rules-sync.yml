@@ -1,0 +1,112 @@
+name: Sync usage rules
+
+# The repo's checks fail when an updated dep changes its usage rules (`mix usage_rules.sync
+# --check`), and Renovate can't run the sync itself, so this commits it to Renovate's branch.
+#
+# The caller sets the trigger and grants the permissions:
+#
+#   on:
+#     pull_request:
+#       paths: [mix.lock]
+#   concurrency:
+#     group: usage-rules-${{ github.head_ref }}
+#     cancel-in-progress: true
+#   permissions: {}
+#   jobs:
+#     sync:
+#       if: startsWith(github.head_ref, 'renovate/') && github.event.pull_request.head.repo.full_name == github.repository
+#       permissions:
+#         contents: write # `commit` pushes the sync
+#         actions: write # and dispatches CI
+#       uses: ftes/ci/.github/workflows/usage-rules-sync.yml@<sha>
+#       with:
+#         skills-path: .claude/skills
+
+on:
+  workflow_call:
+    inputs:
+      skills-path:
+        description: Where `mix usage_rules.sync` writes the skills
+        type: string
+        required: true
+      ci-workflow:
+        description: The workflow to dispatch on Renovate's branch after the sync's push
+        type: string
+        default: ci.yml
+
+permissions: {}
+
+jobs:
+  # Runs the updated deps' code, so without write access. `commit` runs none of it.
+  sync:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      MIX_ENV: test
+      SKILLS: ${{ inputs.skills-path }}
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+        with:
+          version: "2026.8.14"
+          install_args: erlang elixir
+
+      - run: mix deps.get
+      - run: mix usage_rules.sync --yes
+
+      - id: diff
+        run: |
+          git add --all -- "$SKILLS"
+          git diff --cached --binary -- "$SKILLS" > "$RUNNER_TEMP/usage-rules.patch"
+          if [ -s "$RUNNER_TEMP/usage-rules.patch" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+
+      - if: steps.diff.outputs.changed == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: usage-rules-patch
+          path: ${{ runner.temp }}/usage-rules.patch
+          if-no-files-found: error
+          retention-days: 1
+
+  commit:
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      # Keeps its credentials: this job pushes the sync, and runs no code from the branch.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }} # zizmor: ignore[artipacked]
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: usage-rules-patch
+          path: ${{ runner.temp }}
+
+      # A push with GITHUB_TOKEN starts no workflows, but a dispatch does, and the new commit needs
+      # CI. A push that lost a race with Renovate fails here; Renovate's own push runs this again.
+      - name: Commit and run CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.head_ref }}
+          SKILLS: ${{ inputs.skills-path }}
+          CI_WORKFLOW: ${{ inputs.ci-workflow }}
+        run: |
+          git apply --index --include="$SKILLS/*" "$RUNNER_TEMP/usage-rules.patch"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Sync usage rules'
+          git push origin "HEAD:refs/heads/$BRANCH"
+          gh workflow run "$CI_WORKFLOW" --ref "$BRANCH"

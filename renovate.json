@@ -1,0 +1,19 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>ftes/renovate-config"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "The mise version the actions and workflows install",
+      "managerFilePatterns": ["/(^|/)action\\.yml$/", "/^\\.github/workflows/.+\\.yml$/"],
+      "matchStrings": [
+        "mise-version:\\n\\s+description: [^\\n]+\\n\\s+default: \"(?<currentValue>[^\"]+)\"",
+        "version: \"(?<currentValue>[^\"]+)\"\\n\\s+install_args:",
+        "mise-action@[0-9a-f]+ # v[0-9.]+\\n\\s+with:\\n\\s+version: \"(?<currentValue>[^\"]+)\"\\n"
+      ],
+      "depNameTemplate": "jdx/mise",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    }
+  ]
+}

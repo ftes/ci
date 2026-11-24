@@ -1,0 +1,121 @@
+name: Elixir image
+
+# Keeps a Dockerfile's hexpm/elixir image on the Elixir and Erlang of the repo's tool file, on a
+# Debian release Bob built them on. Renovate bumps only the tool file, and Bob builds new versions
+# only on recent Debian releases: this pushes the matching Dockerfile to Renovate's PRs, checks
+# other PRs, and moves to newer Debian releases (security fixes) weekly.
+#
+# The caller sets the triggers and grants the permissions:
+#
+#   on:
+#     pull_request:
+#       paths: [mise.toml, Dockerfile, .github/workflows/elixir-image.yml]
+#     schedule:
+#       - cron: "0 7 * * 1" # Mondays, after Renovate's 0-6h window
+#     workflow_dispatch:
+#   concurrency:
+#     group: elixir-image-${{ github.head_ref || github.ref }}
+#     cancel-in-progress: true
+#   permissions: {}
+#   jobs:
+#     sync:
+#       permissions:
+#         contents: write # pushes the Dockerfile
+#         pull-requests: write # opens the weekly PR
+#         actions: write # dispatches CI: a push with GITHUB_TOKEN starts no workflows
+#       uses: ftes/ci/.github/workflows/elixir-image.yml@<sha>
+#       with:
+#         tool-file: mise.toml
+
+on:
+  workflow_call:
+    inputs:
+      tool-file:
+        description: The file that pins elixir and erlang (mise.toml or .tool-versions)
+        type: string
+        required: true
+      ci-workflow:
+        description: The workflow to dispatch on a branch this pushes to
+        type: string
+        default: ci.yml
+
+permissions: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EVENT: ${{ github.event_name }}
+      TOOL_FILE: ${{ inputs.tool-file }}
+      CI_WORKFLOW: ${{ inputs.ci-workflow }}
+      RENOVATE: ${{ startsWith(github.head_ref, 'renovate/') && github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      # Keeps its credentials: the job pushes the Dockerfile, and runs no code from the branch.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.event.repository.default_branch }} # zizmor: ignore[artipacked]
+
+      - name: Sync the Dockerfile
+        id: sync
+        run: |
+          tools=$(cat "$TOOL_FILE")
+          elixir=$(sed -nE 's/^elixir[ ="]+([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' <<< "$tools")
+          otp=$(sed -nE 's/^erlang[ ="]+([0-9.]*[0-9]).*/\1/p' <<< "$tools")
+          debian=$(sed -nE 's/^ARG DEBIAN_VERSION=//p' Dockerfile)
+
+          # Debian releases Bob built this Elixir and Erlang on, oldest first.
+          releases=$(curl -fsS --retry 3 "https://bob.hex.pm/api/docker?repo=hexpm%2Felixir&os=debian&os_version=trixie-&elixir_version=$elixir&erlang_version=$otp" |
+            jq -r --arg otp "$otp" '[.tags[].tag | capture("-erlang-(?<otp>[0-9.]+)-debian-(?<debian>trixie-[0-9]{8}-slim)$") | select(.otp == $otp) | .debian] | unique[]')
+          if [ -z "$releases" ]; then
+            echo "::error::Bob has no image for Elixir $elixir and Erlang $otp on Debian trixie yet"
+            exit 1
+          fi
+          # PRs keep their Debian release while Bob has it; the weekly run moves to the latest.
+          if [ "$EVENT" != pull_request ] || ! grep -qx "$debian" <<< "$releases"; then
+            debian=$(tail -n 1 <<< "$releases")
+          fi
+
+          sed -i -E "s/^ARG ELIXIR_VERSION=.*/ARG ELIXIR_VERSION=$elixir/; s/^ARG OTP_VERSION=.*/ARG OTP_VERSION=$otp/; s/^ARG DEBIAN_VERSION=.*/ARG DEBIAN_VERSION=$debian/" Dockerfile
+          echo "message=Use Elixir $elixir, Erlang $otp and Debian $debian in the Dockerfile" >> "$GITHUB_OUTPUT"
+          if git diff --quiet; then echo "Dockerfile is up to date"; exit 0; fi
+          git diff
+          if [ "$EVENT" = pull_request ] && [ "$RENOVATE" != true ]; then
+            echo "::error file=Dockerfile::Doesn't match $TOOL_FILE; apply the diff above"
+            exit 1
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      # Fails if Renovate pushed meanwhile; its push runs this job again.
+      - name: Push to Renovate's branch
+        if: github.event_name == 'pull_request' && steps.sync.outputs.changed == 'true'
+        env:
+          BRANCH: ${{ github.head_ref }}
+          MESSAGE: ${{ steps.sync.outputs.message }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit --all --message "$MESSAGE"
+          git push origin "HEAD:refs/heads/$BRANCH"
+          gh workflow run "$CI_WORKFLOW" --ref "$BRANCH"
+
+      # Also closes the PR (by deleting its branch) once the default branch is up to date.
+      - name: Open or update the weekly PR
+        id: pr
+        if: github.event_name != 'pull_request'
+        uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1 # v8.1.3
+        with:
+          branch: chore/elixir-image
+          delete-branch: true
+          commit-message: ${{ steps.sync.outputs.message }}
+          title: ${{ steps.sync.outputs.message }}
+          body: Bob built these versions on a newer Debian release. Opened by ftes/ci's `elixir-image.yml`.
+
+      - name: Run CI on the weekly PR
+        if: steps.pr.outputs.pull-request-operation == 'created' || steps.pr.outputs.pull-request-operation == 'updated'
+        run: gh workflow run "$CI_WORKFLOW" --ref chore/elixir-image
