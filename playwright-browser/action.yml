@@ -1,0 +1,87 @@
+name: Install a Playwright browser
+description: Installs the Playwright driver, a browser and its system packages, from caches when warm.
+
+inputs:
+  browser:
+    description: "chromium, firefox or webkit"
+    default: chromium
+  driver-dir:
+    description: The directory with the playwright package's DRIVER_VERSION and NODE_VERSION (`.` in playwright_ex itself)
+    default: deps/playwright
+  save-apt-cache:
+    description: "Save the system packages' .debs on a miss: from one job per run (the others would race for the key), on main only"
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    # The caches below key on the driver's version: without it every version would share one key.
+    - name: Get runner image
+      id: image
+      shell: bash
+      env:
+        DRIVER_DIR: ${{ inputs.driver-dir }}
+      run: |
+        if [ ! -f "$DRIVER_DIR/DRIVER_VERSION" ]; then
+          echo "::error::No $DRIVER_DIR/DRIVER_VERSION: fetch the deps first (ftes/ci/setup), or set driver-dir"
+          exit 1
+        fi
+        echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
+        echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+    # The driver (with its Node.js) is the same for every browser, so it is cached once.
+    - name: Restore Playwright driver
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/playwright
+        key: playwright-driver-${{ runner.os }}-${{ hashFiles(format('{0}/DRIVER_VERSION', inputs.driver-dir), format('{0}/NODE_VERSION', inputs.driver-dir)) }}
+
+    # Browsers depend on the driver version only, not its bundled Node.js.
+    - name: Restore Playwright browser
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cache/ms-playwright
+        key: playwright-browser-${{ runner.os }}-${{ hashFiles(format('{0}/DRIVER_VERSION', inputs.driver-dir)) }}-${{ inputs.browser }}
+
+    # --with-deps runs apt-get against the runner's Azure mirror, which can stall. The .debs are
+    # cached per browser and driver version, so a warm run installs offline; archive.ubuntu.com is
+    # a fallback mirror, apt times out stalled fetches, and each attempt is capped (a killed
+    # attempt's apt-get, out of timeout's reach under sudo, is killed before the next). The key's
+    # day makes main save a fresh cache daily, so Ubuntu's package updates are picked up; restores
+    # take the newest. autoclean drops the superseded .debs.
+    - name: Restore browser system packages
+      id: apt-cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        key: apt-${{ inputs.browser }}-${{ hashFiles(format('{0}/DRIVER_VERSION', inputs.driver-dir)) }}-${{ steps.image.outputs.os }}-${{ steps.image.outputs.day }}
+        restore-keys: apt-${{ inputs.browser }}-${{ hashFiles(format('{0}/DRIVER_VERSION', inputs.driver-dir)) }}-${{ steps.image.outputs.os }}
+        path: ~/apt-cache
+
+    - name: Install driver, browser and system packages
+      shell: bash
+      env:
+        BROWSER: ${{ inputs.browser }}
+      run: |
+        printf 'Acquire::http::Timeout "30";\nAcquire::https::Timeout "30";\nAcquire::Retries "5";\nDPkg::Lock::Timeout "60";\nAPT::Keep-Downloaded-Packages "true";\n' | sudo tee /etc/apt/apt.conf.d/99timeouts
+        if [[ -f /etc/apt/apt-mirrors.txt ]]; then echo "http://archive.ubuntu.com/ubuntu/" | sudo tee -a /etc/apt/apt-mirrors.txt; fi
+        if compgen -G ~/apt-cache/'*.deb' > /dev/null; then sudo cp ~/apt-cache/*.deb /var/cache/apt/archives/; fi
+        for attempt in 1 2 3; do
+          if timeout 300 mix playwright.install --with-deps "$BROWSER"; then
+            sudo apt-get autoclean -qq
+            rm -rf ~/apt-cache && mkdir -p ~/apt-cache && cp /var/cache/apt/archives/*.deb ~/apt-cache/ 2>/dev/null || true
+            exit 0
+          fi
+          echo "::warning::browser install attempt $attempt failed or timed out"
+          # A killed apt-get can leave dpkg mid-install, which fails every later attempt.
+          sudo pkill -x apt-get || true
+          sudo pkill -x dpkg || true
+          sudo dpkg --configure -a || true
+        done
+        exit 1
+
+    - name: Save browser system packages
+      if: inputs.save-apt-cache == 'true' && github.ref == 'refs/heads/main' && steps.apt-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        key: ${{ steps.apt-cache.outputs.cache-primary-key }}
+        path: ~/apt-cache

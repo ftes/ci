@@ -1,0 +1,95 @@
+name: Set up Elixir
+description: Installs the repo's Erlang and Elixir with mise, restores deps and _build, and fetches and compiles the deps.
+
+# The caller saves the cache, from one job and on main only (a PR's cache would be visible to that
+# PR alone), after a step that proves the build:
+#
+#   - if: success() && github.ref == 'refs/heads/main' && steps.setup.outputs.cache-hit != 'true'
+#     uses: actions/cache/save@<sha>
+#     with: {key: "${{ steps.setup.outputs.cache-key }}", path: "deps\n_build"}
+
+inputs:
+  lane:
+    description: "newest: the repo's .tool-versions or mise.toml, and mix.lock. oldest: .tool-versions.oldest and, if present, mix.lock.oldest (the floors a library supports)."
+    default: newest
+  # Pinned as a workaround for mise.jdx.dev/VERSION racing GitHub release assets. Renovate bumps it.
+  mise-version:
+    description: The mise version to install
+    default: "2026.8.14"
+
+outputs:
+  erlang:
+    description: The installed Erlang version
+    value: ${{ steps.toolchain.outputs.erlang }}
+  elixir:
+    description: The installed Elixir version
+    value: ${{ steps.toolchain.outputs.elixir }}
+  image:
+    description: The runner image ($ImageOS), for keys of caches that don't carry over to another one
+    value: ${{ steps.toolchain.outputs.image }}
+  cache-key:
+    description: The deps and _build cache's key, computed before deps.get
+    value: ${{ steps.cache.outputs.cache-primary-key }}
+  cache-hit:
+    description: Whether that exact key was restored
+    value: ${{ steps.cache.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Select the lane's toolchain
+      shell: bash
+      env:
+        LANE: ${{ inputs.lane }}
+      run: |
+        case "$LANE" in
+          newest) ;;
+          oldest)
+            # mise.toml would win over .tool-versions, and the floor would go untested.
+            if [ -f mise.toml ] && grep -qE '^(erlang|elixir)\b' mise.toml; then
+              echo "::error::lane oldest copies .tool-versions.oldest, but mise.toml pins Erlang or Elixir and takes precedence"
+              exit 1
+            fi
+            cp .tool-versions.oldest .tool-versions
+            if [ -f mix.lock.oldest ]; then cp mix.lock.oldest mix.lock; fi ;;
+          *) echo "::error::lane: newest or oldest, got: $LANE"; exit 1 ;;
+        esac
+
+    # Only Erlang and Elixir: a mise.toml may list deploy tools (Ruby, Kamal) too.
+    - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+      with:
+        version: ${{ inputs.mise-version }}
+        install_args: erlang elixir
+
+    - name: Read the toolchain
+      id: toolchain
+      shell: bash
+      run: |
+        {
+          echo "erlang=$(mise current erlang)"
+          echo "elixir=$(mise current elixir)"
+          echo "image=$ImageOS"
+        } >> "$GITHUB_OUTPUT"
+
+    # deps and the whole _build (the app too: Mix compares content digests, so a fresh checkout
+    # recompiles only what changed, and --warnings-as-errors re-emits the manifest's warnings).
+    # Keyed per runner image (Dialyzer PLTs, NIFs and ERTS paths don't carry over) and toolchain;
+    # the commit in the key keeps _build current, and the newest save wins the prefix restore.
+    - name: Restore deps and _build
+      id: cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        key: mix-${{ steps.toolchain.outputs.image }}-erlang-${{ steps.toolchain.outputs.erlang }}-elixir-${{ steps.toolchain.outputs.elixir }}-${{ env.MIX_ENV }}-${{ hashFiles('mix.lock') }}-${{ github.sha }}
+        restore-keys: |
+          mix-${{ steps.toolchain.outputs.image }}-erlang-${{ steps.toolchain.outputs.erlang }}-elixir-${{ steps.toolchain.outputs.elixir }}-${{ env.MIX_ENV }}-${{ hashFiles('mix.lock') }}-
+          mix-${{ steps.toolchain.outputs.image }}-erlang-${{ steps.toolchain.outputs.erlang }}-elixir-${{ steps.toolchain.outputs.elixir }}-${{ env.MIX_ENV }}-
+        path: |
+          deps
+          _build
+
+    - name: Install dependencies
+      shell: bash
+      # Two commands, not `mix do ... + ...`: an oldest lane's Mix may predate the `+` separator.
+      run: |
+        mix deps.get
+        mix deps.compile

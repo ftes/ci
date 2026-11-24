@@ -1,0 +1,39 @@
+name: Tag
+
+# Each push to main becomes a release: the next patch tag, which Renovate turns into a PR in each
+# repo that pins these actions. Pushes in quick succession can share one: a concurrency group keeps
+# only the newest pending run, and the newest commit is the one to release. A minor or major release
+# is a tag pushed by hand; the next push to main patches on from it.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: tag
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  tag:
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          tags=$(gh api "repos/$GH_REPO/tags" --paginate --jq '.[] | "\(.name) \(.commit.sha)"')
+          if grep -q " $SHA$" <<< "$tags"; then echo "$SHA is already tagged"; exit 0; fi
+          latest=$(cut -d' ' -f1 <<< "$tags" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
+          if [ -z "$latest" ]; then
+            next=v1.0.0
+          else
+            IFS=. read -r major minor patch <<< "${latest#v}"
+            next="v$major.$minor.$((patch + 1))"
+          fi
+          gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$next" -f sha="$SHA" > /dev/null
+          echo "Tagged $SHA as $next"
