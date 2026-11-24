@@ -6,7 +6,7 @@ name: Tag
 # share one: a concurrency group keeps only the newest pending run, and the newest commit is the one
 # to release. A minor or major release is a tag pushed by hand; the next push patches on from it.
 # GITHUB_TOKEN can't create a ref on a commit that edits a workflow (403, it lacks `workflows`),
-# so that push stays untagged: the next push releases it, or tag it by hand.
+# so that push only warns: the next push the job can tag releases it, or tag it by hand.
 on:
   push:
     branches: [main]
@@ -39,5 +39,11 @@ jobs:
             IFS=. read -r major minor patch <<< "${latest#v}"
             next="v$major.$minor.$((patch + 1))"
           fi
-          gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$next" -f sha="$SHA" > /dev/null
+          if ! gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$next" -f sha="$SHA" > /dev/null; then
+            if gh api "repos/$GH_REPO/commits/$SHA" --jq '.files[].filename' | grep -q '^\.github/workflows/'; then
+              echo "::warning::$SHA edits a workflow, which GITHUB_TOKEN can't tag: the next push the job can tag releases it, or tag $next by hand"
+              exit 0
+            fi
+            exit 1
+          fi
           echo "Tagged $SHA as $next"
