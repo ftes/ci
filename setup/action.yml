@@ -27,6 +27,9 @@ outputs:
   image:
     description: The runner image ($ImageOS), for keys of caches that don't carry over to another one
     value: ${{ steps.toolchain.outputs.image }}
+  erlang-build:
+    description: A hash of the installed Erlang build (its Dialyzer beams), for Dialyzer PLT cache keys. A PLT only fits the build that made it, and the same version built another way (from source, or precompiled) differs.
+    value: ${{ steps.toolchain.outputs.erlang-build }}
   cache-key:
     description: The deps and _build cache's key, computed before deps.get
     value: ${{ steps.cache.outputs.cache-primary-key }}
@@ -79,6 +82,9 @@ runs:
           echo "erlang=$(mise current erlang)"
           echo "elixir=$(mise current elixir)"
           echo "image=$ImageOS"
+          # Dialyzer rejects a PLT ("Old PLT file") whose stored hash of its own beams differs.
+          dialyzer=$(erl -noshell -eval 'io:format("~s", [code:lib_dir(dialyzer)])' -s init stop)
+          echo "erlang-build=$(cat "$dialyzer"/ebin/*.beam | sha256sum | cut -c1-12)"
         } >> "$GITHUB_OUTPUT"
 
     # deps and the whole _build (the app too: Mix compares content digests, so a fresh checkout
