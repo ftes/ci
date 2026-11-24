@@ -23,11 +23,14 @@ reviews:
     # Drafts wait until ready; any base branch, so a PR stacked on another gets reviewed.
     drafts: false
     base_branches: [".*"]
+    # Renovate's PRs are tested by CI and merge on their own.
+    ignore_usernames: ["renovate[bot]"]
   # Requests changes for blocking findings and approves once its threads are resolved and the
   # latest commit is reviewed: with a ruleset requiring one approval, that gates the merge (a
-  # declined finding: resolve it, or `@coderabbitai approve`). Renovate's PRs are reviewed too, so
-  # their automerge gets the approval.
+  # declined finding: resolve it, or `@coderabbitai approve`).
   auto_approvals:
     enabled: true
+    # A skipped review (Renovate's PRs, a draft, a file limit) still approves, so automerge works.
+    approve_on_skipped_review: true
   # A review that stops on an error fails the `CodeRabbit` check instead of passing silently.
   fail_commit_status: true
