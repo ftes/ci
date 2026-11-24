@@ -39,7 +39,7 @@ defmodule Release do
     if "refs/tags/#{tag}" in String.split(tags), do: raise("#{tag} exists on GitHub")
 
     dir = Path.join(System.tmp_dir!(), "release-#{Path.basename(repo)}-#{System.os_time()}")
-    sh!("gh", ["repo", "clone", repo, dir, "--", "--quiet"])
+    sh!("gh", ["repo", "clone", repo, dir, "--", "--quiet", "--branch", "main"])
     File.cd!(dir)
     sh!("jj", ["git", "init", "--colocate"])
 
@@ -113,7 +113,8 @@ defmodule Release do
         line = "Drives [Playwright #{driver}](#{url}), on\nNode #{node}.#{same}"
 
         if body =~ "Drives [Playwright ",
-          do: Regex.replace(~r/Drives \[Playwright .*?(?=\n\n)/s, body, line, global: false),
+          do:
+            Regex.replace(~r/Drives \[Playwright [^\n]*\nNode [^\n]*/, body, line, global: false),
           else: "\n" <> line <> "\n" <> body
       else
         body
