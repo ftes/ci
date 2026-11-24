@@ -247,7 +247,7 @@ defmodule ReleaseScript do
 
     cond do
       opts[:help] -> IO.write(@usage)
-      opts[:check] and invalid == [] and args == [] -> check(config!())
+      opts[:check] == true and invalid == [] and args == [] -> check(config!())
       invalid != [] or length(args) != 1 -> abort(@usage)
       true -> release(hd(args), Keyword.get(opts, :dry_run, false))
     end
