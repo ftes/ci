@@ -1,8 +1,9 @@
 name: Tag
 
-# Every push to main is a release: the next patch tag, which Renovate turns into a PR in each repo
-# that pins these actions. A minor or major release is a tag pushed by hand; the next push to main
-# patches on from it.
+# Each push to main becomes a release: the next patch tag, which Renovate turns into a PR in each
+# repo that pins these actions. Pushes in quick succession can share one: a concurrency group keeps
+# only the newest pending run, and the newest commit is the one to release. A minor or major release
+# is a tag pushed by hand; the next push to main patches on from it.
 on:
   push:
     branches: [main]

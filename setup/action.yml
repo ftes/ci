@@ -45,6 +45,11 @@ runs:
         case "$LANE" in
           newest) ;;
           oldest)
+            # mise.toml would win over .tool-versions, and the floor would go untested.
+            if [ -f mise.toml ] && grep -qE '^(erlang|elixir)\b' mise.toml; then
+              echo "::error::lane oldest copies .tool-versions.oldest, but mise.toml pins Erlang or Elixir and takes precedence"
+              exit 1
+            fi
             cp .tool-versions.oldest .tool-versions
             if [ -f mix.lock.oldest ]; then cp mix.lock.oldest mix.lock; fi ;;
           *) echo "::error::lane: newest or oldest, got: $LANE"; exit 1 ;;
@@ -84,4 +89,7 @@ runs:
 
     - name: Install dependencies
       shell: bash
-      run: mix do deps.get + deps.compile
+      # Two commands, not `mix do ... + ...`: an oldest lane's Mix may predate the `+` separator.
+      run: |
+        mix deps.get
+        mix deps.compile

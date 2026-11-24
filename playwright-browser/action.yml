@@ -15,10 +15,17 @@ inputs:
 runs:
   using: composite
   steps:
+    # The caches below key on the driver's version: without it every version would share one key.
     - name: Get runner image
       id: image
       shell: bash
+      env:
+        DRIVER_DIR: ${{ inputs.driver-dir }}
       run: |
+        if [ ! -f "$DRIVER_DIR/DRIVER_VERSION" ]; then
+          echo "::error::No $DRIVER_DIR/DRIVER_VERSION: fetch the deps first (ftes/ci/setup), or set driver-dir"
+          exit 1
+        fi
         echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
         echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
 
@@ -65,7 +72,10 @@ runs:
             exit 0
           fi
           echo "::warning::browser install attempt $attempt failed or timed out"
+          # A killed apt-get can leave dpkg mid-install, which fails every later attempt.
           sudo pkill -x apt-get || true
+          sudo pkill -x dpkg || true
+          sudo dpkg --configure -a || true
         done
         exit 1
 

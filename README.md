@@ -25,4 +25,4 @@ Each file's header shows how to call it.
 - **Flat.** An action here can't call another one at its own commit, so callers compose them.
 - **Small.** A need of one repo is a step next to the shared one in that repo, not a new input.
 
-Every push to main is tagged as the next patch release (`tag.yml`); tag a minor or major by hand.
+Each push to main is tagged as the next patch release (`tag.yml`); tag a minor or major by hand.
