@@ -48,6 +48,8 @@ jobs:
         env:
           MISE_ERLANG_COMPILE: "false"
           ERLANG: ${{ steps.setup.outputs.erlang }}
+          ERLANG_BUILD: ${{ steps.setup.outputs.erlang-build }}
         run: |
-          echo "MISE_ERLANG_PRECOMPILED_OS=$MISE_ERLANG_PRECOMPILED_OS"
+          echo "MISE_ERLANG_PRECOMPILED_OS=$MISE_ERLANG_PRECOMPILED_OS erlang-build=$ERLANG_BUILD"
+          [[ $ERLANG_BUILD =~ ^[0-9a-f]{12}$ ]]
           time mise install --force "erlang@$ERLANG"
