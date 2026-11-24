@@ -25,6 +25,8 @@ jobs:
       - run: zizmor --persona=regular --format=github .
         env:
           GH_TOKEN: ${{ github.token }}
+      # The actions' scripts; actionlint checks only the workflows' run blocks.
+      - run: shellcheck claude-review/*.sh
 
   # `setup` on the fixture project. Erlang must come precompiled: a cold install from source takes
   # ~5 min per job. The reinstall forbids compiling, so it fails if setup's precompiled OS is

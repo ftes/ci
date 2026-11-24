@@ -1,0 +1,85 @@
+# For tag mode (`@claude` in a comment, review or issue): decides, before anything is checked out,
+# whether Claude runs, and with what. Its own job, before Claude's, which needs it:
+#
+#   gate:
+#     # The comment's tag and a maintainer's association; never on Renovate's PRs.
+#     if: contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association || github.event.review.author_association || github.event.issue.author_association) && ...
+#     permissions: {issues: read, pull-requests: read}
+#     outputs: {skip: "${{ steps.gate.outputs.skip }}", ...}
+#     steps:
+#       - id: gate
+#         uses: ftes/ci/claude-tag@<sha>
+#   claude:
+#     needs: gate
+#     if: needs.gate.outputs.skip != 'true'
+#     ...
+#       - uses: ftes/ci/claude@<sha>
+#         with:
+#           comment-authors: ${{ needs.gate.outputs.comment-authors }}
+#           allowed-tools: "...,${{ needs.gate.outputs.gh }}"
+name: Claude tag gate
+description: Skips other repositories' and Renovate's PRs, and lists the gh commands Claude may run and the maintainers whose comments it sees.
+
+outputs:
+  skip:
+    description: "`true` on another repository's or Renovate's PR, or when a lookup fails"
+    value: ${{ steps.authors.outputs.skip == 'true' && 'true' || steps.pr.outputs.skip }}
+  other-repo:
+    description: "`true` on another repository's PR, which the caller may answer"
+    value: ${{ steps.pr.outputs.other-repo }}
+  gh:
+    description: "Claude's --allowedTools for gh, on this event's PR or issue only"
+    value: ${{ steps.pr.outputs.gh }}
+  comment-authors:
+    description: The maintainers who commented, reviewed or left review comments here, and claude[bot], for ftes/ci/claude's comment-authors
+    value: ${{ steps.authors.outputs.list }}
+
+runs:
+  using: composite
+  steps:
+    - name: Skip other repositories' and Renovate's PRs
+      id: pr
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) }}
+        ISSUE: ${{ github.event.issue.number }}
+      run: |
+        if [[ -z $PR ]]; then
+          echo "gh=Bash(gh issue view $ISSUE),Bash(gh issue view $ISSUE *)" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        echo "gh=Bash(gh pr view $PR),Bash(gh pr view $PR *),Bash(gh pr diff $PR),Bash(gh pr diff $PR *)" >> "$GITHUB_OUTPUT"
+        pr=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json isCrossRepository,headRefName --jq '"\(.isCrossRepository) \(.headRefName)"') ||
+          { echo "::error::Couldn't look up PR $PR."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; }
+        if [[ $pr != "false "* ]]; then
+          echo "::notice::Claude runs only on this repository's PRs."
+          { echo "skip=true"; echo "other-repo=true"; } >> "$GITHUB_OUTPUT"
+        elif [[ $pr == "false renovate/"* ]]; then
+          echo "::notice::Claude doesn't run on Renovate's PRs."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    # include_comments_by_actor matches logins. An empty list would show Claude everyone's, so a
+    # failed lookup skips Claude.
+    - name: List the maintainers who commented
+      id: authors
+      if: steps.pr.outputs.skip != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR: ${{ github.event.pull_request.number || (github.event.issue.pull_request && github.event.issue.number) }}
+        ISSUE: ${{ github.event.issue.number }}
+      run: |
+        paths=("issues/${PR:-$ISSUE}/comments")
+        if [[ -n $PR ]]; then paths+=("pulls/$PR/comments" "pulls/$PR/reviews"); fi
+        logins=()
+        for path in "${paths[@]}"; do
+          if ! out=$(gh api --paginate "repos/$GITHUB_REPOSITORY/$path" \
+            --jq '.[] | select(.author_association | IN("OWNER", "MEMBER", "COLLABORATOR")) | .user.login'); then
+            echo "::error::Couldn't list $path."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          mapfile -t -O "${#logins[@]}" logins <<< "$out"
+        done
+        list=$(printf '%s\n' "${logins[@]}" "claude[bot]" | grep -E '^[A-Za-z0-9-]+(\[bot\])?$' | sort -u | paste -sd, -)
+        echo "list=$list" >> "$GITHUB_OUTPUT"
