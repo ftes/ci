@@ -28,7 +28,7 @@ outputs:
     description: The runner image ($ImageOS), for keys of caches that don't carry over to another one
     value: ${{ steps.toolchain.outputs.image }}
   erlang-build:
-    description: A hash of the installed Erlang build (its Dialyzer beams), for Dialyzer PLT cache keys. A PLT only fits the build that made it, and the same version built another way (from source, or precompiled) differs.
+    description: A hash of the installed Erlang build (its Dialyzer beams), for Dialyzer PLT cache keys (the deps and _build key has it already). A PLT only fits the build that made it, and the same version built another way (from source, or precompiled) differs.
     value: ${{ steps.toolchain.outputs.erlang-build }}
   cache-key:
     description: The deps and _build cache's key, computed before deps.get
@@ -89,16 +89,17 @@ runs:
 
     # deps and the whole _build (the app too: Mix compares content digests, so a fresh checkout
     # recompiles only what changed, and --warnings-as-errors re-emits the manifest's warnings).
-    # Keyed per runner image (Dialyzer PLTs, NIFs and ERTS paths don't carry over) and toolchain;
+    # Keyed per runner image (Dialyzer PLTs, NIFs and ERTS paths don't carry over) and toolchain,
+    # its Erlang build included (Dialyxir keeps the deps PLT in _build/<env> by default);
     # the commit in the key keeps _build current, and the newest save wins the prefix restore.
     - name: Restore deps and _build
       id: cache
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        key: mix-${{ steps.toolchain.outputs.image }}-erlang-${{ steps.toolchain.outputs.erlang }}-elixir-${{ steps.toolchain.outputs.elixir }}-${{ env.MIX_ENV }}-${{ hashFiles('mix.lock') }}-${{ github.sha }}
+        key: mix-${{ steps.toolchain.outputs.image }}-erlang-${{ steps.toolchain.outputs.erlang }}-${{ steps.toolchain.outputs.erlang-build }}-elixir-${{ steps.toolchain.outputs.elixir }}-${{ env.MIX_ENV }}-${{ hashFiles('mix.lock') }}-${{ github.sha }}
         restore-keys: |
-          mix-${{ steps.toolchain.outputs.image }}-erlang-${{ steps.toolchain.outputs.erlang }}-elixir-${{ steps.toolchain.outputs.elixir }}-${{ env.MIX_ENV }}-${{ hashFiles('mix.lock') }}-
-          mix-${{ steps.toolchain.outputs.image }}-erlang-${{ steps.toolchain.outputs.erlang }}-elixir-${{ steps.toolchain.outputs.elixir }}-${{ env.MIX_ENV }}-
+          mix-${{ steps.toolchain.outputs.image }}-erlang-${{ steps.toolchain.outputs.erlang }}-${{ steps.toolchain.outputs.erlang-build }}-elixir-${{ steps.toolchain.outputs.elixir }}-${{ env.MIX_ENV }}-${{ hashFiles('mix.lock') }}-
+          mix-${{ steps.toolchain.outputs.image }}-erlang-${{ steps.toolchain.outputs.erlang }}-${{ steps.toolchain.outputs.erlang-build }}-elixir-${{ steps.toolchain.outputs.elixir }}-${{ env.MIX_ENV }}-
         path: |
           deps
           _build
