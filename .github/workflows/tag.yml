@@ -2,15 +2,16 @@ name: Tag
 
 # Each push to main that changes more than docs becomes a release: the next patch tag, which
 # Renovate turns into a PR in each repo that pins these actions. A docs-only push would give them a
-# PR that changes nothing, so its docs ship with the next release. Pushes in quick succession can
-# share one: a concurrency group keeps only the newest pending run, and the newest commit is the one
-# to release. A minor or major release is a tag pushed by hand; the next push patches on from it.
-# GITHUB_TOKEN can't create a ref on a commit that edits a workflow (403, it lacks `workflows`),
-# so that push only warns: the next push the job can tag releases it, or tag it by hand.
+# PR that changes nothing, so its docs ship with the next release; so would CodeRabbit's config.
+# Pushes in quick succession can share one: a concurrency group keeps only the newest pending run,
+# and the newest commit is the one to release. A minor or major release is a tag pushed by hand; the
+# next push patches on from it. GITHUB_TOKEN can't create a ref on a commit that edits a workflow
+# (403, it lacks `workflows`), so that push only warns: the next push the job can tag releases it,
+# or tag it by hand.
 on:
   push:
     branches: [main]
-    paths-ignore: ["**.md"]
+    paths-ignore: ["**.md", ".coderabbit.yaml"]
 
 concurrency:
   group: tag
