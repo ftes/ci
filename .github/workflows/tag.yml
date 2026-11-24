@@ -1,12 +1,14 @@
 name: Tag
 
-# Each push to main becomes a release: the next patch tag, which Renovate turns into a PR in each
-# repo that pins these actions. Pushes in quick succession can share one: a concurrency group keeps
-# only the newest pending run, and the newest commit is the one to release. A minor or major release
-# is a tag pushed by hand; the next push to main patches on from it.
+# Each push to main that changes more than docs becomes a release: the next patch tag, which
+# Renovate turns into a PR in each repo that pins these actions. A docs-only push would give them a
+# PR that changes nothing, so its docs ship with the next release. Pushes in quick succession can
+# share one: a concurrency group keeps only the newest pending run, and the newest commit is the one
+# to release. A minor or major release is a tag pushed by hand; the next push patches on from it.
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md"]
 
 concurrency:
   group: tag
