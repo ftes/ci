@@ -1,0 +1,88 @@
+# Prepares a PR review for ftes/ci/claude, in a `pull_request` job that checked out the PR with its
+# history (`fetch-depth: 0`): compares the PR with the version Claude last reviewed, collects the
+# maintainers' comments (Claude's tools can't read comments) and writes the prompt.
+#
+#   - id: review
+#     uses: ftes/ci/claude-review@<sha>
+#     with:
+#       ci: "`mix lint` and the tests (.github/workflows/ci.yml)"
+#   - if: steps.review.outputs.skip != 'true'
+#     uses: ftes/ci/claude@<sha>
+#     with:
+#       prompt: ${{ steps.review.outputs.prompt }}
+#       allowed-bots: claude[bot]
+#       max-turns: "80"
+#       allowed-tools: "Read,Grep,Glob,Agent,Task,Write,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh pr view <n>),Bash(gh pr view <n> *),Bash(gh pr diff <n>),Bash(gh pr diff <n> *),Bash(gh pr comment <n> *),mcp__github_inline_comment__create_inline_comment"
+name: Claude review
+description: Finds what changed since Claude's last review, collects maintainers' comments and writes the review prompt.
+
+inputs:
+  ci:
+    description: "What the repo's CI checks, completing \"CI runs ...\" (`mix lint` and the tests): Claude doesn't review that"
+    required: true
+  notes:
+    description: The repo's own review guidance, one or more sentences after the verification step
+    default: ""
+
+outputs:
+  skip:
+    description: "`true` when the PR has the changes Claude last reviewed (a rebase, or no change)"
+    value: ${{ steps.increment.outputs.mode == 'skip' }}
+  prompt:
+    description: The review prompt, for ftes/ci/claude
+    value: ${{ steps.prompt.outputs.prompt }}
+
+runs:
+  using: composite
+  steps:
+    # Should it fail, Claude reviews it all.
+    - name: Compare with the last review
+      id: increment
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        BASE_REF: ${{ github.base_ref }}
+      run: bash "$GITHUB_ACTION_PATH/increment.sh"
+
+    # Should it fail, so does the step: no review without them.
+    - name: Collect maintainers' comments
+      if: steps.increment.outputs.mode != 'skip'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+      run: bash "$GITHUB_ACTION_PATH/comments.sh"
+
+    - name: Write the prompt
+      id: prompt
+      if: steps.increment.outputs.mode != 'skip'
+      shell: bash
+      env:
+        CI: ${{ inputs.ci }}
+        NOTES: ${{ inputs.notes }}
+        PR: ${{ github.event.pull_request.number }}
+        BASE_REF: ${{ github.base_ref }}
+        NOTE: ${{ steps.increment.outputs.note }}
+        HEAD: ${{ steps.increment.outputs.head }}
+        FORK: ${{ steps.increment.outputs.fork }}
+      run: |
+        body=$(cat "$GITHUB_ACTION_PATH/prompt.md")
+        body=${body//@CI@/$CI}
+        body=${body//@NOTES@/${NOTES:+ $NOTES}}
+        eof="EOF_$(openssl rand -hex 16)"
+        {
+          echo "prompt<<$eof"
+          echo "REPO: $GITHUB_REPOSITORY"
+          echo "PR: $PR"
+          echo "BASE: origin/$BASE_REF"
+          echo "LAST REVIEW: ${NOTE:-none}"
+          echo "MARKER: <!-- claude-review: ${HEAD} ${FORK} -->"
+          echo
+          printf '%s\n' "$body"
+          echo "$eof"
+        } >> "$GITHUB_OUTPUT"
