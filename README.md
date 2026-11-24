@@ -29,9 +29,9 @@ Each file's header shows how to call it.
 
 Triggers and job conditions can't be shared as an action, so the CI of each repo that uses these
 copies the lines below. Any base branch runs, so stacked PRs get CI; drafts, and PRs below the top
-of a GitHub stack, skip their jobs: the top holds every change below it. A required check that
-aggregates jobs (`needs:` with `if: always()`) puts the condition on its step instead, so those PRs
-report it green.
+of a GitHub stack (`gh stack link`; a `--base` chain alone isn't one, and each of its PRs runs CI),
+skip their jobs: the top holds every change below it. A required check that aggregates jobs
+(`needs:` with `if: always()`) puts the condition on its step instead, so those PRs report it green.
 
 ```yaml
 on:
