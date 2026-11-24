@@ -22,7 +22,7 @@ description: Skips other repositories' and Renovate's PRs, and lists the gh comm
 
 outputs:
   skip:
-    description: "`true` on another repository's or Renovate's PR, a failed lookup, or with no comment authors"
+    description: "`true` on another repository's or Renovate's PR, or when a lookup fails"
     value: ${{ steps.authors.outputs.skip == 'true' && 'true' || steps.pr.outputs.skip }}
   other-repo:
     description: "`true` on another repository's PR, which the caller may answer"
