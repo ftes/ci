@@ -14,6 +14,7 @@ per release and merges it once the repo's checks pass, so each repo's CI tests e
 | [`kamal-deploy`](kamal-deploy/action.yml) | Ruby and Kamal with mise, SSH with pinned host keys, `kamal deploy` |
 | [`elixir-image.yml`](.github/workflows/elixir-image.yml) | reusable: keeps the Dockerfile's hexpm/elixir image on the repo's toolchain |
 | [`usage-rules-sync.yml`](.github/workflows/usage-rules-sync.yml) | reusable: commits `mix usage_rules.sync` to Renovate's PRs |
+| [`release.exs`](release/release.exs) | a library's release, run locally: `scripts/release <version>` fetches it at a pinned commit |
 
 Each file's header shows how to call it.
 
