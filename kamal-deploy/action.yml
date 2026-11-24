@@ -1,5 +1,5 @@
 name: Kamal deploy
-description: Installs the repo's Ruby and Kamal with mise and runs `kamal deploy` over SSH.
+description: Installs the repo's Ruby and Kamal with mise and runs `kamal deploy` over SSH, for the default branch's head only.
 
 # The app's secrets reach Kamal (.kamal/secrets) as the job's env, which composite steps inherit:
 #
@@ -46,6 +46,24 @@ runs:
           printf 'Host *\n  StrictHostKeyChecking yes\n' > ~/.ssh/config
         fi
 
+    # A run whose commit the default branch has moved past skips the deploy: its CI can finish after
+    # a newer one's, or be re-run, and would ship an older image. The newer commit deploys after its
+    # own CI.
+    - name: Check this is the default branch's head
+      id: head
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        head=$(gh api "repos/$GITHUB_REPOSITORY/commits/$BRANCH" --jq .sha)
+        if [ "$head" = "$GITHUB_SHA" ]; then
+          echo "current=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::notice::Not deploying $GITHUB_SHA: $BRANCH is at $head, which deploys after its own CI"
+        fi
+
     - name: Deploy
+      if: steps.head.outputs.current == 'true'
       shell: bash
       run: kamal deploy
