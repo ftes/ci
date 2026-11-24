@@ -33,13 +33,17 @@ on:
         description: The workflow to dispatch on Renovate's branch after the sync's push
         type: string
         default: ci.yml
+      runs-on:
+        description: The runner label for the jobs
+        type: string
+        default: ubuntu-26.04
 
 permissions: {}
 
 jobs:
   # Runs the updated deps' code, so without write access. `commit` runs none of it.
   sync:
-    runs-on: ubuntu-26.04
+    runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -87,7 +91,7 @@ jobs:
   commit:
     needs: sync
     if: needs.sync.outputs.changed == 'true'
-    runs-on: ubuntu-26.04
+    runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 5
     permissions:
       contents: write

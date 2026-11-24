@@ -38,12 +38,16 @@ on:
         description: The workflow to dispatch on a branch this pushes to
         type: string
         default: ci.yml
+      runs-on:
+        description: The runner label for the jobs
+        type: string
+        default: ubuntu-26.04
 
 permissions: {}
 
 jobs:
   sync:
-    runs-on: ubuntu-26.04
+    runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 5
     permissions:
       contents: write
