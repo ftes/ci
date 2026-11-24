@@ -78,12 +78,23 @@ runs:
         PROMPT_FILE: ${{ inputs.prompt-file }}
         JSON_SCHEMA: ${{ inputs.json-schema }}
         MAX_TURNS: ${{ inputs.max-turns }}
+        MODEL: ${{ inputs.model }}
+        system_prompt: ${{ inputs.system-prompt }}
+        allowed_tools: ${{ inputs.allowed-tools }}
+        disallowed_tools: ${{ inputs.disallowed-tools }}
+        add_dir: ${{ inputs.add-dir }}
       run: |
         if [[ -n $PROMPT_FILE && ( ! $PROMPT_FILE =~ ^[A-Za-z0-9._/-]+$ || $PROMPT_FILE == *..* ) ]]; then
           echo "::error::prompt-file: a path in the repository, got: $PROMPT_FILE"; exit 1
         fi
         if [[ $JSON_SCHEMA == *"'"* || $JSON_SCHEMA == *$'\n'* ]]; then echo "::error::json-schema: one line without single quotes"; exit 1; fi
         if [[ ! $MAX_TURNS =~ ^[0-9]+$ ]]; then echo "::error::max-turns: a number, got: $MAX_TURNS"; exit 1; fi
+        if [[ ! $MODEL =~ ^[a-z0-9.-]+$ ]]; then echo "::error::model: a model id, got: $MODEL"; exit 1; fi
+        # They sit in quoted claude_args arguments.
+        for name in system-prompt allowed-tools disallowed-tools add-dir; do
+          var=${name//-/_}; value=${!var}
+          if [[ $value == *'"'* || $value == *$'\n'* ]]; then echo "::error::$name: one line without double quotes"; exit 1; fi
+        done
 
     # From the default branch, not the checkout: a branch's change to a prompt takes effect once it
     # is merged.
@@ -133,7 +144,7 @@ runs:
           ${{ inputs.add-dir != '' && format('--add-dir {0}', inputs.add-dir) || '' }}
           --append-system-prompt "${{ inputs.system-prompt }} Prefer your file tools over Bash to read, search and edit files, and keep any scratch files under tmp/; run each allowed Bash command on its own, without cd, git -C, semicolons, &&, pipes or heredocs (you are already in the repository). Give any subagent you start these same rules. No Claude attribution: leave the Generated with Claude Code signature out of commits, PRs and comments."
           --allowedTools "${{ inputs.allowed-tools }}"
-          --disallowedTools "Bash(gh pr * -R*),Bash(gh pr * --repo*),Bash(gh issue * -R*),Bash(gh issue * --repo*),Bash(gh pr view *comments*),Bash(gh pr view *eview*),Bash(gh pr view * -c*),Bash(gh issue view *comments*),Bash(gh issue view * -c*),Bash(gh api *comments*),Bash(gh api *reviews*),Bash(gh api *timeline*),Bash(gh api graphql*),Bash(gh api *..*),Bash(gh api *%*),Bash(gh api * --hostname*),Bash(mix cmd*),Bash(mix run*),Bash(mix eval*),Bash(*mix cmd*)${{ inputs.disallowed-tools != '' && format(',{0}', inputs.disallowed-tools) || '' }}"
+          --disallowedTools "Bash(gh pr * -R*),Bash(gh pr * --repo*),Bash(gh issue * -R*),Bash(gh issue * --repo*),Bash(gh pr view *comments*),Bash(gh pr view *eview*),Bash(gh pr view * -c*),Bash(gh issue view *comments*),Bash(gh issue view * -c*),Bash(gh api *comments*),Bash(gh api *reviews*),Bash(gh api *timeline*),Bash(gh api graphql*),Bash(gh api *..*),Bash(gh api *%*),Bash(gh api * --hostname*),Bash(mix cmd*),Bash(*mix cmd*),Bash(*mix run*),Bash(*mix eval*)${{ inputs.disallowed-tools != '' && format(',{0}', inputs.disallowed-tools) || '' }}"
           ${{ inputs.json-schema != '' && format('--json-schema ''{0}''', inputs.json-schema) || '' }}
 
     # summary.jq: only the final message and the denied calls, as the transcript can hold secrets.

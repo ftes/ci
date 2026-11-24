@@ -15,6 +15,9 @@ finish() {
   exit 0
 }
 
+# Never a stale or committed one: the prompt reads it in increment mode only, but it's in the checkout.
+rm -f tmp/claude-review/increment.diff
+
 fork=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
 { echo "head=$HEAD_SHA"; echo "fork=$fork"; } >> "$GITHUB_OUTPUT"
 [ -n "$fork" ] || finish full "No fork point from $BASE_REF; full review."
@@ -27,11 +30,14 @@ marker=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
 read -r _ old_head old_fork <<< "$marker"
 
 # A rebase leaves the reviewed commits on no branch, and the checkout keeps no credentials.
+# The empty extraheader drops one a checkout with credentials left, which would be a second header.
 auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
-git -c "http.extraHeader=Authorization: Basic $auth" fetch --quiet --no-tags origin "$old_head" "$old_fork" ||
+echo "::add-mask::$auth"
+git -c "http.https://github.com/.extraheader=" -c "http.extraHeader=Authorization: Basic $auth" fetch --quiet --no-tags origin "$old_head" "$old_fork" ||
   finish full "Couldn't fetch the reviewed commit ${old_head:0:12}; full review."
 
-if [ "$(git diff "$old_fork" "$old_head" | git patch-id --stable)" = "$(git diff "$fork" "$HEAD_SHA" | git patch-id --stable)" ]; then
+# --verbatim and --binary: a whitespace-only or binary change is a change.
+if [ "$(git diff --binary "$old_fork" "$old_head" | git patch-id --verbatim)" = "$(git diff --binary "$fork" "$HEAD_SHA" | git patch-id --verbatim)" ]; then
   finish skip "Same changes as the review of ${old_head:0:12} (a rebase, or no change); review skipped."
 fi
 

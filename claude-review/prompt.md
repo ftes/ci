@@ -1,12 +1,12 @@
 Review this pull request like a senior maintainer of this codebase. The PR is checked out; read
 whatever you need.
 
-First pick the depth. With an earlier review, tmp/claude-review/increment.diff has what changed
-since. Review just the increment, and how it meets the rest of the PR, when it refines the PR
-within its design: fixes, follow-ups to findings, local changes. Review the whole PR when the
-increment changes its shape: new areas, a changed public API or behaviour, a different approach,
-or much of the PR rewritten. Read the whole diff either way. The steps below apply to what you
-review.
+First pick the depth. In MODE increment, tmp/claude-review/increment.diff has what changed since
+the last review. Review just the increment, and how it meets the rest of the PR, when it refines
+the PR within its design: fixes, follow-ups to findings, local changes. Review the whole PR when
+the increment changes its shape: new areas, a changed public API or behaviour, a different
+approach, or much of the PR rewritten. In MODE full, review the whole PR. Read the whole diff
+either way. The steps below apply to what you review.
 
 1. Read AGENTS.md and the files it references for the project's rules, and follow its Reviewing
    guidance. Read the PR description (`gh pr view PR`) and the diff (`git diff BASE...HEAD`).

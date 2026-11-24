@@ -1,6 +1,7 @@
 # Prepares a PR review for ftes/ci/claude, in a `pull_request` job that checked out the PR with its
-# history (`fetch-depth: 0`): compares the PR with the version Claude last reviewed, collects the
-# maintainers' comments (Claude's tools can't read comments) and writes the prompt.
+# history (`fetch-depth: 0`, `persist-credentials: false`): compares the PR with the version Claude
+# last reviewed, collects the maintainers' comments (Claude's tools can't read comments) and writes
+# the prompt.
 #
 #   - id: review
 #     uses: ftes/ci/claude-review@<sha>
@@ -67,19 +68,23 @@ runs:
         NOTES: ${{ inputs.notes }}
         PR: ${{ github.event.pull_request.number }}
         BASE_REF: ${{ github.base_ref }}
+        MODE: ${{ steps.increment.outputs.mode }}
         NOTE: ${{ steps.increment.outputs.note }}
         HEAD: ${{ steps.increment.outputs.head }}
         FORK: ${{ steps.increment.outputs.fork }}
       run: |
         body=$(cat "$GITHUB_ACTION_PATH/prompt.md")
-        body=${body//@CI@/$CI}
-        body=${body//@NOTES@/${NOTES:+ $NOTES}}
+        notes=${NOTES:+ $NOTES}
+        # Quoted, so an & in them stays one (bash 5.2's patsub_replacement).
+        body=${body//@CI@/"$CI"}
+        body=${body//@NOTES@/"$notes"}
         eof="EOF_$(openssl rand -hex 16)"
         {
           echo "prompt<<$eof"
           echo "REPO: $GITHUB_REPOSITORY"
           echo "PR: $PR"
           echo "BASE: origin/$BASE_REF"
+          echo "MODE: ${MODE:-full}"
           echo "LAST REVIEW: ${NOTE:-none}"
           echo "MARKER: <!-- claude-review: ${HEAD} ${FORK} -->"
           echo
