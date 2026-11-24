@@ -5,6 +5,8 @@ name: Tag
 # PR that changes nothing, so its docs ship with the next release. Pushes in quick succession can
 # share one: a concurrency group keeps only the newest pending run, and the newest commit is the one
 # to release. A minor or major release is a tag pushed by hand; the next push patches on from it.
+# GITHUB_TOKEN can't create a ref on a commit that edits a workflow (403, it lacks `workflows`),
+# so that push stays untagged: the next push releases it, or tag it by hand.
 on:
   push:
     branches: [main]
