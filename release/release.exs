@@ -242,17 +242,24 @@ defmodule ReleaseScript do
   """
 
   def main(argv) do
-    {opts, args, invalid} =
-      OptionParser.parse(argv, strict: [dry_run: :boolean, check: :boolean, help: :boolean])
-
-    cond do
-      opts[:help] -> IO.write(@usage)
-      opts[:check] == true and invalid == [] and args == [] -> check(config!())
-      invalid != [] or length(args) != 1 -> abort(@usage)
-      true -> release(hd(args), Keyword.get(opts, :dry_run, false))
+    case command(argv) do
+      :help -> IO.write(@usage)
+      :usage -> abort(@usage)
+      :check -> check(config!())
+      {:release, version, dry_run?} -> release(version, dry_run?)
     end
   rescue
     error in Error -> abort(error.message)
+  end
+
+  def command(argv) do
+    case OptionParser.parse(argv, strict: [dry_run: :boolean, check: :boolean, help: :boolean]) do
+      {[help: true], [], []} -> :help
+      {[check: true], [], []} -> :check
+      {[dry_run: true], [version], []} -> {:release, version, true}
+      {[], [version], []} -> {:release, version, false}
+      _ -> :usage
+    end
   end
 
   # The repo's config, with every key this script reads: a key added here fails a repo's config

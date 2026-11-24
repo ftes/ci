@@ -336,6 +336,23 @@ defmodule ReleaseScript.ConfigTest do
     }
   end
 
+  test "command/1 parses the command line" do
+    assert ReleaseScript.command(["1.2.0"]) == {:release, "1.2.0", false}
+    assert ReleaseScript.command(["--dry-run", "1.2.0"]) == {:release, "1.2.0", true}
+    assert ReleaseScript.command(["--check"]) == :check
+    assert ReleaseScript.command(["--help"]) == :help
+
+    for argv <- [
+          [],
+          ["1.2.0", "1.3.0"],
+          ["--check", "1.2.0"],
+          ["--dry-run"],
+          ["--bogus", "1.2.0"]
+        ] do
+      assert ReleaseScript.command(argv) == :usage
+    end
+  end
+
   test "config!/0 validates the repo's config" do
     assert_raise Error, ~r/lacks `remote`, `branch`, .*`changelog.rc_only`$/, fn ->
       ReleaseScript.config!()
