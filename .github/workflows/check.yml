@@ -9,7 +9,7 @@ permissions: {}
 
 jobs:
   lint:
-    runs-on: ubicloud-standard-2-ubuntu-2604
+    runs-on: ${{ vars.RUNNER == 'github' && 'ubuntu-26.04' || 'ubicloud-standard-2-ubuntu-2604' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -33,7 +33,7 @@ jobs:
   # missing or has no build, even when mise's cache restored Erlang. Then setup must fail when
   # deps.get changes mix.lock, and pass on a lock it leaves as is.
   setup:
-    runs-on: ubicloud-standard-2-ubuntu-2604
+    runs-on: ${{ vars.RUNNER == 'github' && 'ubuntu-26.04' || 'ubicloud-standard-2-ubuntu-2604' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -80,7 +80,7 @@ jobs:
   # The release script (release/): formatted, and it compiles (with no arguments it raises its
   # usage). On the fixture project's toolchain, set up as in the setup job.
   release:
-    runs-on: ubicloud-standard-2-ubuntu-2604
+    runs-on: ${{ vars.RUNNER == 'github' && 'ubuntu-26.04' || 'ubicloud-standard-2-ubuntu-2604' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -99,7 +99,7 @@ jobs:
     name: quality
     if: always()
     needs: [lint, setup, release]
-    runs-on: ubicloud-standard-2-ubuntu-2604
+    runs-on: ${{ vars.RUNNER == 'github' && 'ubuntu-26.04' || 'ubicloud-standard-2-ubuntu-2604' }}
     timeout-minutes: 5
     permissions: {}
     steps:
