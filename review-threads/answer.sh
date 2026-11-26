@@ -20,7 +20,10 @@ answers=$(jq -c --slurpfile listed "$listed" '
 failed=0
 while read -r answer; do
   id=$(jq -r .id <<< "$answer")
-  if ! gh api graphql -f thread="$id" -f body="$(jq -r .reply <<< "$answer")" -f query='
+  body=$(jq -r .reply <<< "$answer")
+  # list.sh resolves a thread with this marker on its last reply, should resolving it fail here.
+  [[ $(jq -r .fixed <<< "$answer") == true ]] && body+=$'\n\n<!-- review-threads: fixed -->'
+  if ! gh api graphql -f thread="$id" -f body="$body" -f query='
       mutation($thread: ID!, $body: String!) {
         addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $thread, body: $body}) { comment { id } }
       }' > /dev/null; then
@@ -30,10 +33,19 @@ while read -r answer; do
     gh api graphql -f subject="$(jq -r .root <<< "$answer")" -f query='
       mutation($subject: ID!) { addReaction(input: {subjectId: $subject, content: THUMBS_UP}) { reaction { content } } }' > /dev/null ||
       echo "::warning::Couldn't react to thread $id."
-    gh api graphql -f thread="$id" -f query='
-      mutation($thread: ID!) { resolveReviewThread(input: {threadId: $thread}) { thread { isResolved } } }' > /dev/null ||
-      { echo "::warning::Couldn't resolve thread $id."; failed=1; }
-    echo "Thread $id: fixed, resolved."
+    resolved=false
+    for attempt in 1 2 3; do
+      if gh api graphql -f thread="$id" -f query='
+          mutation($thread: ID!) { resolveReviewThread(input: {threadId: $thread}) { thread { isResolved } } }' > /dev/null; then
+        resolved=true; break
+      fi
+      sleep $((attempt * 5))
+    done
+    if [[ $resolved == true ]]; then
+      echo "Thread $id: fixed, resolved."
+    else
+      echo "::warning::Couldn't resolve thread $id; the next ftes/ci/review-threads run does."; failed=1
+    fi
   else
     echo "Thread $id: declined, left open."
   fi

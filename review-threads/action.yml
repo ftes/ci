@@ -3,7 +3,7 @@
 # call GraphQL itself (ftes/ci/claude), and claude-code-action revokes its app token when it ends,
 # so the threads go in by file and the answers come out as structured output.
 #
-#   permissions: {pull-requests: read}
+#   permissions: {pull-requests: write} # answer posts; review-threads resolves a failed one
 #   steps:
 #     - id: threads
 #       uses: ftes/ci/review-threads@<sha>
