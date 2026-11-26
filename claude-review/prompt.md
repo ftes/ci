@@ -45,15 +45,22 @@ marks those). Then say which depth you chose and why, and in a few sentences wha
 and the most important findings (by their label), or why you found nothing. After an increment
 review, cover what changed since the last review and say in a line whether the earlier findings
 still hold, without repeating the earlier summary. End the comment with the MARKER line,
-verbatim.
+verbatim, unless the review failed (below).
 
 Before posting the summary, submit its verdict as a review: the MARKER makes a rerun of the same
 changes skip, so it lands only after the verdict. First check that the PR's head is still the
-commit you reviewed, the MARKER's first SHA, so the review can't approve a newer one:
-`gh pr view PR --json headRefOid --jq .headRefOid`. Then, when nothing is blocking, run
-`gh pr review PR --approve --body "Verdict: OK to merge."`, otherwise
+commit you reviewed, the MARKER's first SHA: `gh pr view PR --json headRefOid --jq .headRefOid`.
+Then, when nothing is blocking, run `gh pr review PR --approve --body "Verdict: OK to merge."`,
+otherwise
 `gh pr review PR --request-changes --body "Verdict: Issues found: N blocking, M non-blocking."`.
-Each review replaces your last one, so a request for changes holds until a later run approves.
-Submit none when the head moved (the newer push gets a run of its own) or the PR's author is
-claude[bot] (GitHub refuses a review of your own PR), and say so in the summary, as you do if the
-review is refused.
+GitHub puts the review on the head at that moment, so a push between the check and the review
+can still get an approval it never had: after approving, check the head again, and if it moved,
+run `gh pr review PR --request-changes --body "Verdict: the head moved during the review."`; the
+newer push's run decides. Each review replaces your last one, so a request for changes holds
+until a later run approves.
+
+Submit none when the head moved before the review (the newer push gets a run of its own) or the
+PR's author is claude[bot] (GitHub refuses a review of your own PR), and say so in the summary.
+If the review is refused as a tool call no rule allows, say so too: a rerun would be refused
+again. If GitHub rejects it with an error, retry once; if it fails again, say so and leave the
+MARKER line out of the summary, so a rerun reviews again.
