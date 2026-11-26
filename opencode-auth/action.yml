@@ -1,0 +1,32 @@
+name: OpenCode auth
+description: Exchanges the job's GitHub OIDC token for a short-lived OpenCode service-account token.
+
+inputs:
+  client-id:
+    description: The OpenCode service account's GitHub Actions client ID
+    required: true
+
+outputs:
+  token:
+    description: The short-lived OpenCode service-account token
+    value: ${{ steps.auth.outputs.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Sign in to OpenCode
+      id: auth
+      shell: bash
+      env:
+        AUDIENCE: https://opencode.ai/console
+        CLIENT_ID: ${{ inputs.client-id }}
+      run: |
+        oidc=$(curl -sSf --oauth2-bearer "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUDIENCE" | jq -er .value)
+        token=$(curl -sSf https://opencode.ai/console/auth/oauth/token \
+          -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+          -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \
+          -d "client_id=$CLIENT_ID" \
+          -d "subject_token=$oidc" | jq -er .access_token)
+        echo "::add-mask::$token"
+        printf 'token=%s\n' "$token" >> "$GITHUB_OUTPUT"

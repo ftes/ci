@@ -1,0 +1,60 @@
+# Lists PRs' open review threads, the findings reviewer bots left unresolved, for a Claude run that
+# addresses them, which ftes/ci/review-threads/answer then answers. Claude can't read comments or
+# call GraphQL itself (ftes/ci/claude), and claude-code-action revokes its app token when it ends,
+# so the threads go in by file and the answers come out as structured output.
+#
+#   permissions: {pull-requests: write} # answer posts; review-threads resolves a failed one
+#   steps:
+#     - id: threads
+#       uses: ftes/ci/review-threads@<sha>
+#       with:
+#         prs: ${{ matrix.pr.number }}
+#     - id: claude
+#       uses: ftes/ci/claude@<sha>
+#       with:
+#         prompt: "... tmp/review-threads/<PR>.md has the open findings ..."
+#         json-schema: ${{ steps.threads.outputs.schema }}
+#         allowed-tools: "...,StructuredOutput"
+#     - if: ${{ !cancelled() && steps.claude.outputs.structured_output != '' }}
+#       uses: ftes/ci/review-threads/answer@<sha>
+#       with:
+#         pr: ${{ matrix.pr.number }}
+#         answers: ${{ steps.claude.outputs.structured_output }}
+name: Review threads
+description: Lists PRs' open review threads by reviewer bots into tmp/review-threads/, for Claude to address.
+
+inputs:
+  prs:
+    description: PR numbers, space-separated
+    required: true
+  authors:
+    description: The reviewer bots whose threads count, by GraphQL login (no [bot]), space-separated
+    default: claude coderabbitai
+  answerer:
+    description: Who answers the threads (ftes/ci/review-threads/answer with the job's token), by GraphQL login
+    default: github-actions
+  max-answers:
+    description: Answers per thread before it is left to the maintainers, so two bots don't argue every night
+    default: "2"
+
+outputs:
+  open:
+    description: The PRs with at least one open thread, as a JSON array of numbers
+    value: ${{ steps.list.outputs.open }}
+  schema:
+    description: The json-schema for Claude's answer (ftes/ci/claude), which ftes/ci/review-threads/answer reads
+    value: '{"type":"object","properties":{"threads":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"fixed":{"type":"boolean"},"reply":{"type":"string"}},"required":["id","fixed","reply"]}}},"required":["threads"]}'
+
+runs:
+  using: composite
+  steps:
+    - id: list
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        PRS: ${{ inputs.prs }}
+        AUTHORS: ${{ inputs.authors }}
+        ANSWERER: ${{ inputs.answerer }}
+        MAX_ANSWERS: ${{ inputs.max-answers }}
+      run: bash "$GITHUB_ACTION_PATH/list.sh"

@@ -1,0 +1,26 @@
+# Answers the review threads ftes/ci/review-threads listed, in the same job, from Claude's structured
+# output: a reply to each, and on a fixed one a 👍 and the thread resolved, so a ruleset requiring
+# resolved conversations lets the PR merge. Posts as github-actions[bot], with the job's token.
+# See ../action.yml for the call.
+#
+#   permissions: {pull-requests: write}
+name: Answer review threads
+description: Replies to the listed review threads from Claude's answer, reacts to and resolves the fixed ones.
+
+inputs:
+  pr:
+    description: The PR number
+    required: true
+  answers:
+    description: Claude's structured output for ftes/ci/review-threads' schema, as a JSON string
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR: ${{ inputs.pr }}
+        ANSWERS: ${{ inputs.answers }}
+      run: bash "$GITHUB_ACTION_PATH/../answer.sh"
