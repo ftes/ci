@@ -46,3 +46,14 @@ and the most important findings (by their label), or why you found nothing. Afte
 review, cover what changed since the last review and say in a line whether the earlier findings
 still hold, without repeating the earlier summary. End the comment with the MARKER line,
 verbatim.
+
+Before posting the summary, submit its verdict as a review: the MARKER makes a rerun of the same
+changes skip, so it lands only after the verdict. First check that the PR's head is still the
+commit you reviewed, the MARKER's first SHA, so the review can't approve a newer one:
+`gh pr view PR --json headRefOid --jq .headRefOid`. Then, when nothing is blocking, run
+`gh pr review PR --approve --body "Verdict: OK to merge."`, otherwise
+`gh pr review PR --request-changes --body "Verdict: Issues found: N blocking, M non-blocking."`.
+Each review replaces your last one, so a request for changes holds until a later run approves.
+Submit none when the head moved (the newer push gets a run of its own) or the PR's author is
+claude[bot] (GitHub refuses a review of your own PR), and say so in the summary, as you do if the
+review is refused.
