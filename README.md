@@ -11,6 +11,7 @@ per release and merges it once the repo's checks pass, so each repo's CI tests e
 | [`claude`](claude/action.yml) | claude-code-action with the shared model, tool rules and no attribution, a safe step summary |
 | [`claude-tag`](claude-tag/action.yml) | for `@claude`: skips other repositories' and Renovate's PRs, lists maintainers' comments and the allowed `gh` commands |
 | [`claude-review`](claude-review/action.yml) | a PR review's increment since the last one, maintainers' comments and the prompt |
+| [`review-threads`](review-threads/action.yml) | a PR's open findings by reviewer bots, for Claude to address; [`answer`](review-threads/answer/action.yml) replies, reacts and resolves the fixed ones |
 | [`kamal-deploy`](kamal-deploy/action.yml) | Ruby and Kamal with mise, SSH with pinned host keys, `kamal deploy` |
 | [`elixir-image.yml`](.github/workflows/elixir-image.yml) | reusable: keeps the Dockerfile's hexpm/elixir image on the repo's toolchain |
 | [`usage-rules-sync.yml`](.github/workflows/usage-rules-sync.yml) | reusable: commits `mix usage_rules.sync` to Renovate's PRs |
