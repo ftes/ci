@@ -284,8 +284,11 @@ def close(target, reason, token, *, allowed=None):
     if not current(target) or (allowed is not None and not allowed()):
         return
     number = target["number"]
-    api(f"pulls/{number}", token=token, method="PATCH", payload={"state": "closed"})
-    api(f"issues/{number}/comments", token=token, method="POST", payload={"body": reason})
+    comments = f"issues/{number}/comments"
+    if not any(bot_login(item, {BOT}) and item["body"] == reason for item in api(comments, paginate=True)):
+        api(comments, token=token, method="POST", payload={"body": reason})
+    if current(target) and (allowed is None or allowed()):
+        api(f"pulls/{number}", token=token, method="PATCH", payload={"state": "closed"})
 
 
 def triage(targets, prompt):
@@ -349,6 +352,8 @@ def fix(target, prompt):
         require(changed, "No fix to publish")
     if decision == "retry":
         require(not changed, "A retry may not publish edits")
+    if decision == "skip" and not answers["threads"]:
+        return
     with app_token() as token:
         if check_fix(target) != snapshot:
             return
@@ -458,6 +463,8 @@ def publish(targets, prompt, mode):
                      payload={"head": branch, "base": BASE, "title": title, "body": body, "draft": upstream})
             require(pr["head"]["sha"] == sha, "Publication branch moved during PR creation")
         print(pr["html_url"])
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+            print(f"Published {pr['html_url']}", file=summary)
         if target:
             close(target, f"Redone on current {BASE}; replaced by {pr['html_url']}.", token,
                   allowed=lambda: remote_head(BASE) == parent)
