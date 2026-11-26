@@ -3,7 +3,7 @@
 # and <PR>.md, for Claude. A thread is open while it is unresolved, a reviewer bot (AUTHORS) started
 # it, and ANSWERER hasn't had the last word or answered it MAX_ANSWERS times. Only the reviewer
 # bots', ANSWERER's and maintainers' comments are kept: anyone can reply to a public PR's thread.
-# A thread ANSWERER answered as fixed (its reaction on the first comment) but couldn't resolve is
+# A thread ANSWERER answered as fixed (its reaction on its last reply) but couldn't resolve is
 # resolved here. Writes to
 # $GITHUB_OUTPUT `open`, the PRs with at least one open thread, as a JSON array.
 # Env: GH_TOKEN, REPO, PRS, AUTHORS, ANSWERER, MAX_ANSWERS.
@@ -15,7 +15,10 @@ mkdir -p "$dir"
 open=()
 for pr in $PRS; do
   [[ $pr =~ ^[0-9]+$ ]] || { echo "::error::prs: PR numbers, got: $pr"; exit 1; }
-  gh api graphql --paginate -f owner="${REPO%/*}" -f name="${REPO#*/}" -F pr="$pr" -f query='
+  # The viewer is the same GitHub Actions bot that posts the reply and the reaction.
+  comment_fields='pageInfo { hasNextPage endCursor }
+    nodes { id author { login } authorAssociation body reactionGroups { content viewerHasReacted } }'
+  threads=$(gh api graphql --paginate -f owner="${REPO%/*}" -f name="${REPO#*/}" -F pr="$pr" -f query='
     query($owner: String!, $name: String!, $pr: Int!, $endCursor: String) {
       repository(owner: $owner, name: $name) {
         pullRequest(number: $pr) {
@@ -23,42 +26,57 @@ for pr in $PRS; do
             pageInfo { hasNextPage endCursor }
             nodes {
               id isResolved isOutdated path line originalLine
-              comments(first: 50) { nodes { id author { login } authorAssociation body reactions(first: 100) { nodes { id content user { login } } } } }
+              comments(first: 50) { '"$comment_fields"' }
             }
           }
         }
       }
-    }' --jq '.data.repository.pullRequest.reviewThreads.nodes[]' |
+    }' --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)')
+  {
+    while IFS= read -r thread; do
+      [[ -n $thread ]] || continue
+      if [[ $(jq -r '.comments.pageInfo.hasNextPage' <<< "$thread") == true ]]; then
+        comments=$(gh api graphql --paginate -f id="$(jq -r .id <<< "$thread")" -f query='
+          query($id: ID!, $endCursor: String) {
+            node(id: $id) {
+              ... on PullRequestReviewThread {
+                comments(first: 50, after: $endCursor) { '"$comment_fields"' }
+              }
+            }
+          }' --jq '.data.node.comments.nodes[]' | jq -s .) || exit 1
+        thread=$(jq -c --argjson comments "$comments" '.comments.nodes = $comments' <<< "$thread")
+      fi
+      printf '%s\n' "$thread"
+    done <<< "$threads"
+  } |
     jq -s --arg authors "$AUTHORS" --arg answerer "$ANSWERER" --argjson max "$MAX_ANSWERS" '
       ($authors | split(" ") | map(select(. != ""))) as $bots
-      | map(select(.isResolved | not)
-          | .comments = (.comments.nodes | map({id, author: (.author.login // ""), maintainer: (.authorAssociation | IN("OWNER", "MEMBER", "COLLABORATOR")), body,
-              thumbs_up: ([.reactions.nodes[]? | select(.content == "THUMBS_UP" and .user.login == $answerer)] | first | .id // null)}))
+       | map(.comments = (.comments.nodes | map({id, author: (.author.login // ""), maintainer: (.authorAssociation | IN("OWNER", "MEMBER", "COLLABORATOR")), body,
+               thumbs_up: any(.reactionGroups[]?; .content == "THUMBS_UP" and .viewerHasReacted)}))
           | select(.comments[0].author | IN($bots[]))
           | .comments |= map(select(.maintainer or (.author | IN($bots[], $answerer))))
-          # Answered as fixed, but its resolution failed: the reaction by the answerer on the
-          # first comment says so, and text in a reply cannot fake it: resolved below, without
-          # another answer.
-          | .pending = (.comments[0].thumbs_up and .comments[-1].author == $answerer)
+           # Only the latest trusted reply can carry a pending fix. The root is never a marker.
+           | .pending = ((.comments | length) > 1 and .comments[-1].author == $answerer and .comments[-1].thumbs_up)
           | select(.pending or (.comments[-1].author != $answerer))
           | select(.pending or ([.comments[] | select(.author == $answerer)] | length < $max))
-          | {id, pending, path, line: (.line // .originalLine), outdated: .isOutdated, root: .comments[0].id,
+           | {id, pending, pending_reply: (if .pending then .comments[-1].id else null end),
+              path, line: (.line // .originalLine), outdated: .isOutdated, root: .comments[0].id,
              comments: (.comments | map({author, body: (.body | gsub("<!--[\\s\\S]*?-->"; "") | gsub("<picture>[\\s\\S]*?</picture>"; "") | .[:6000])}))})' \
       > "$dir/$pr.all.json"
   for id in $(jq -r '.[] | select(.pending) | .id' "$dir/$pr.all.json"); do
-    reaction=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .comments[0].thumbs_up' "$dir/$pr.all.json")
+    reply=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .pending_reply' "$dir/$pr.all.json")
     if gh api graphql -f thread="$id" -f query='
         mutation($thread: ID!) { resolveReviewThread(input: {threadId: $thread}) { thread { isResolved } } }' > /dev/null; then
       echo "Thread $id: answered as fixed earlier, resolved now."
       # The reaction says the finding is fixed; resolved, it has said that already.
-      gh api graphql -f id="$reaction" -f query='
-        mutation($id: ID!) { deleteReaction(input: {id: $id}) { reaction { id } } }' > /dev/null ||
+      gh api graphql -f subject="$reply" -f query='
+        mutation($subject: ID!) { removeReaction(input: {subjectId: $subject, content: THUMBS_UP}) { reaction { id } } }' > /dev/null ||
         echo "::warning::Couldn't remove the reaction on thread $id."
     else
       echo "::warning::Couldn't resolve thread $id, answered as fixed earlier."
     fi
   done
-  jq 'map(select(.pending | not) | del(.pending))' "$dir/$pr.all.json" > "$dir/$pr.json"
+  jq 'map(select(.pending | not) | del(.pending, .pending_reply))' "$dir/$pr.all.json" > "$dir/$pr.json"
   rm "$dir/$pr.all.json"
   count=$(jq length "$dir/$pr.json")
   echo "PR $pr: $count open review threads"
