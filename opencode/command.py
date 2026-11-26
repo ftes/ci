@@ -22,11 +22,15 @@ BOT_EMAIL = f"219766164+{run.BOT}@users.noreply.github.com"
 PROTECTED = (".git", ".github", ".opencode", ".claude", ".agents", "tmp/opencode")
 
 
+def unquoted(value):
+    return "\n".join(line for line in (value or "").splitlines() if not line.lstrip().startswith(">"))
+
+
 def authorize(event, event_name):
     request = event.get(REQUEST_KEY.get(event_name)) or {}
     author = request.get("user") or {}
     sender = event["sender"]
-    message = "\n".join(request.get(key) or "" for key in ("title", "body"))
+    message = "\n".join(unquoted(request.get(key)) for key in ("title", "body"))
     if (not AGENT_COMMAND.search(message) or request.get("author_association") not in run.MAINTAINERS
             or author.get("type") != "User" or sender["type"] != "User"):
         return None
@@ -173,7 +177,11 @@ def command(number, branch, default_branch, is_pr, run_id, prompt, request):
         if is_pr:
             run.save("pr.diff", run.snapshot_diff(pr)[1])
             run.save("checks.json", run.gh("pr", "view", str(number), "--json", "statusCheckRollup"))
-        run.save("request.json", {key: request.get(key) for key in ("title", "body", "path", "line", "diff_hunk")})
+        run.save("request.json", {
+            "title": unquoted(request.get("title")),
+            "body": unquoted(request.get("body")),
+            **{key: request.get(key) for key in ("path", "line", "diff_hunk")},
+        })
         result = run.agent(f"{prompt}\nContext: {run.CONTEXT}/{number}.json.",
                            '{"reply":"...", "title":"one-line commit title if you edited files; otherwise empty"}',
                            settings=settings())

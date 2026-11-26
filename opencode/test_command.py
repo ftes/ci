@@ -59,6 +59,13 @@ class GateTest(unittest.TestCase):
                 self.assertEqual(command.target(event, "issue_comment", "main", "99"), {})
                 api.assert_not_called()
 
+    def test_quoted_command_does_not_authorize(self):
+        event = {"sender": MEMBER, "comment": request("Quoting the request:\n  > /agent fix it"),
+                 "issue": {"number": 32}}
+        with patch.object(run, "api") as api:
+            self.assertEqual(command.target(event, "issue_comment", "main", "99"), {})
+        api.assert_not_called()
+
     def test_assigned_issue_requires_write_access_for_the_sender_and_author(self):
         event = {"sender": MEMBER, "issue": {"number": 32} | request(author=MEMBER | {"login": "bob"})}
         with patch.object(run, "api", side_effect=[{"permission": "write"}, {"permission": "read"}]) as api:
@@ -129,7 +136,7 @@ class PublishTest(unittest.TestCase):
     def test_pr_change_uses_the_inspected_head_as_the_push_lease(self):
         with (patch.object(run, "api", side_effect=[pr(), [], pr(), {}]) as api,
               patch.object(run, "git", side_effect=[HEAD, ""]),
-              patch.object(run, "context"), patch.object(run, "save"), patch.object(run, "gh"),
+              patch.object(run, "context"), patch.object(run, "save") as save, patch.object(run, "gh"),
               patch.object(run, "snapshot_diff", return_value=("base", b"diff")),
               patch.object(run, "agent", return_value={"title": "Fix the test", "reply": "Updated."}),
               patch.object(command, "recover", return_value=None),
@@ -137,8 +144,10 @@ class PublishTest(unittest.TestCase):
               patch.object(command, "stage", return_value=True),
               patch.object(command, "push") as push,
               patch.object(run, "app_token", return_value=contextlib.nullcontext("token"))):
-            command.command(32, BRANCH, "main", True, "99", "Prompt", request())
+            command.command(32, BRANCH, "main", True, "99", "Prompt",
+                            request("> /agent do something else\n\n/agent fix the test"))
         push.assert_called_once_with(BRANCH, "token", HEAD)
+        self.assertEqual(save.call_args.args[1]["body"].strip(), "/agent fix the test")
         self.assertEqual(api.call_args.kwargs["payload"]["body"], "Updated.\n\n<!-- opencode-command: 99 -->")
 
     def test_issue_publication_recovers_without_repeating_model_or_push(self):
