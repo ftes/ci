@@ -3,7 +3,8 @@
 # and <PR>.md, for Claude. A thread is open while it is unresolved, a reviewer bot (AUTHORS) started
 # it, and ANSWERER hasn't had the last word or answered it MAX_ANSWERS times. Only the reviewer
 # bots', ANSWERER's and maintainers' comments are kept: anyone can reply to a public PR's thread.
-# A thread ANSWERER answered as fixed (answer.sh's marker) but couldn't resolve is resolved here. Writes to
+# A thread ANSWERER answered as fixed (its reaction on the first comment) but couldn't resolve is
+# resolved here. Writes to
 # $GITHUB_OUTPUT `open`, the PRs with at least one open thread, as a JSON array.
 # Env: GH_TOKEN, REPO, PRS, AUTHORS, ANSWERER, MAX_ANSWERS.
 # shellcheck disable=SC2016 # $ in single quotes is GraphQL or jq, not shell.
@@ -22,7 +23,7 @@ for pr in $PRS; do
             pageInfo { hasNextPage endCursor }
             nodes {
               id isResolved isOutdated path line originalLine
-              comments(first: 50) { nodes { id author { login } authorAssociation body } }
+              comments(first: 50) { nodes { id author { login } authorAssociation body reactions(first: 100) { nodes { id content user { login } } } } }
             }
           }
         }
@@ -31,20 +32,28 @@ for pr in $PRS; do
     jq -s --arg authors "$AUTHORS" --arg answerer "$ANSWERER" --argjson max "$MAX_ANSWERS" '
       ($authors | split(" ") | map(select(. != ""))) as $bots
       | map(select(.isResolved | not)
-          | .comments = (.comments.nodes | map({id, author: (.author.login // ""), maintainer: (.authorAssociation | IN("OWNER", "MEMBER", "COLLABORATOR")), body}))
+          | .comments = (.comments.nodes | map({id, author: (.author.login // ""), maintainer: (.authorAssociation | IN("OWNER", "MEMBER", "COLLABORATOR")), body,
+              thumbs_up: ([.reactions.nodes[]? | select(.content == "THUMBS_UP" and .user.login == $answerer)] | first | .id // null)}))
           | select(.comments[0].author | IN($bots[]))
           | .comments |= map(select(.maintainer or (.author | IN($bots[], $answerer))))
-          # Answered as fixed, but its resolution failed: resolved below, without another answer.
-          | .pending = (.comments[-1] | .author == $answerer and (.body | contains("<!-- review-threads: fixed -->")))
+          # Answered as fixed, but its resolution failed: the reaction by the answerer on the
+          # first comment says so, and text in a reply cannot fake it: resolved below, without
+          # another answer.
+          | .pending = (.comments[0].thumbs_up and .comments[-1].author == $answerer)
           | select(.pending or (.comments[-1].author != $answerer))
           | select(.pending or ([.comments[] | select(.author == $answerer)] | length < $max))
           | {id, pending, path, line: (.line // .originalLine), outdated: .isOutdated, root: .comments[0].id,
              comments: (.comments | map({author, body: (.body | gsub("<!--[\\s\\S]*?-->"; "") | gsub("<picture>[\\s\\S]*?</picture>"; "") | .[:6000])}))})' \
       > "$dir/$pr.all.json"
   for id in $(jq -r '.[] | select(.pending) | .id' "$dir/$pr.all.json"); do
+    reaction=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .comments[0].thumbs_up' "$dir/$pr.all.json")
     if gh api graphql -f thread="$id" -f query='
         mutation($thread: ID!) { resolveReviewThread(input: {threadId: $thread}) { thread { isResolved } } }' > /dev/null; then
       echo "Thread $id: answered as fixed earlier, resolved now."
+      # The reaction says the finding is fixed; resolved, it has said that already.
+      gh api graphql -f id="$reaction" -f query='
+        mutation($id: ID!) { deleteReaction(input: {id: $id}) { reaction { id } } }' > /dev/null ||
+        echo "::warning::Couldn't remove the reaction on thread $id."
     else
       echo "::warning::Couldn't resolve thread $id, answered as fixed earlier."
     fi

@@ -21,8 +21,6 @@ failed=0
 while read -r answer; do
   id=$(jq -r .id <<< "$answer")
   body=$(jq -r .reply <<< "$answer")
-  # list.sh resolves a thread with this marker on its last reply, should resolving it fail here.
-  [[ $(jq -r .fixed <<< "$answer") == true ]] && body+=$'\n\n<!-- review-threads: fixed -->'
   if ! gh api graphql -f thread="$id" -f body="$body" -f query='
       mutation($thread: ID!, $body: String!) {
         addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $thread, body: $body}) { comment { id } }
@@ -30,6 +28,8 @@ while read -r answer; do
     echo "::warning::Couldn't reply to thread $id."; failed=1; continue
   fi
   if [[ $(jq -r .fixed <<< "$answer") == true ]]; then
+    # The reaction, not the reply's text, says the finding is fixed: a quoted text can't fake it.
+    # list.sh resolves the thread on its own if that fails.
     gh api graphql -f subject="$(jq -r .root <<< "$answer")" -f query='
       mutation($subject: ID!) { addReaction(input: {subjectId: $subject, content: THUMBS_UP}) { reaction { content } } }' > /dev/null ||
       echo "::warning::Couldn't react to thread $id."
