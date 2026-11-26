@@ -13,7 +13,7 @@
 #       prompt: ${{ steps.review.outputs.prompt }}
 #       allowed-bots: claude[bot]
 #       max-turns: "80"
-#       allowed-tools: "Read,Grep,Glob,Agent,Task,Write,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh pr view <n>),Bash(gh pr view <n> *),Bash(gh pr diff <n>),Bash(gh pr diff <n> *),Bash(gh pr comment <n> *),mcp__github_inline_comment__create_inline_comment"
+#       allowed-tools: "Read,Grep,Glob,Agent,Task,Write,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(gh pr view <n>),Bash(gh pr view <n> *),Bash(gh pr diff <n>),Bash(gh pr diff <n> *),Bash(gh pr comment <n> *),Bash(gh pr review <n> *),mcp__github_inline_comment__create_inline_comment"
 name: Claude review
 description: Finds what changed since Claude's last review, collects maintainers' comments and writes the review prompt.
 
