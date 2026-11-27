@@ -312,6 +312,24 @@ def close(target, reason, token, *, allowed=None):
     return False
 
 
+def close_nightly(target, reason, token, *, allowed):
+    branch, head = target["branch"], target["head"]
+    require(re.fullmatch(NIGHTLY, branch), "Expected a nightly branch")
+    if not close(target, reason, token, allowed=allowed) or not current(target, state="closed"):
+        return
+    if remote_head(branch) != head:
+        return
+    # Exhaustion runs without a checkout. A temporary bare repo can send the leased delete.
+    with tempfile.TemporaryDirectory() as repository:
+        git("init", "--quiet", "--bare", repository)
+        try:
+            push(branch, token, head, source="", cwd=repository)
+        except subprocess.CalledProcessError:
+            if remote_head(branch) == head:
+                raise
+            print("The closed branch moved or was removed; leaving it alone.")
+
+
 def triage(targets, prompt):
     parent = git("rev-parse", "HEAD")
     active = {target["number"]: target for target in targets if current(target)}
@@ -411,7 +429,7 @@ def fix(target, prompt):
             if re.fullmatch(UPSTREAM, branch):
                 api(f"issues/{number}/comments", token=token, method="POST", payload={"body": f"Needs a human: {reason}"})
             else:
-                close(target, reason, token, allowed=lambda: check_fix(target) == snapshot)
+                close_nightly(target, reason, token, allowed=lambda: check_fix(target) == snapshot)
             return
         if decision in ("fix", "retry"):
             title = "Re-run CI" if decision == "retry" else text(result["title"], 200, multiline=False)
@@ -525,23 +543,13 @@ def nightly_open():
 
 def exhaust(targets):
     for target in targets:
-        require(re.fullmatch(NIGHTLY, target["branch"]), "Expected a nightly branch")
         pr = current(target)
         failure = ci_failure(target) if pr and pr["commits"] >= 3 else None
         if not failure:
             continue
         with app_token() as token:
-            closed = close(target, "CI still fails after two automatic fixes.", token,
-                           allowed=lambda: ci_failure(target) == failure)
-            if closed and current(target, state="closed") and remote_head(target["branch"]) == target["head"]:
-                with tempfile.TemporaryDirectory() as repository:
-                    git("init", "--quiet", "--bare", repository)
-                    try:
-                        push(target["branch"], token, target["head"], source="", cwd=repository)
-                    except subprocess.CalledProcessError:
-                        if remote_head(target["branch"]) == target["head"]:
-                            raise
-                        print("The exhausted branch moved or was removed; leaving it alone.")
+            close_nightly(target, "CI still fails after two automatic fixes.", token,
+                          allowed=lambda: ci_failure(target) == failure)
 
 
 def main():

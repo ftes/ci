@@ -69,9 +69,31 @@ class ScheduledTest(unittest.TestCase):
             self.assertEqual(push.call_args.args, (target["branch"], "app", target["head"]))
             self.assertEqual(push.call_args.kwargs["source"], "")
             push.reset_mock()
+            close.return_value = False
+            scheduled.exhaust([target])
+            push.assert_not_called()
+            push.reset_mock()
+            close.return_value = True
             ref.return_value = "b" * 40
             scheduled.exhaust([target])
             push.assert_not_called()
+
+    def test_nightly_give_up_uses_leased_cleanup_and_retains_the_ci_check(self):
+        target = {"number": 2, "branch": "opencode/nightly-1", "head": "a" * 40, "failing": True}
+        result = {"decision": "give-up", "reason": "Needs redesign.", "answers": {"threads": []}}
+        with (patch.object(scheduled, "check_fix", return_value=(10, 2)) as check,
+              patch.object(scheduled, "write_context", return_value=""),
+              patch.object(scheduled, "agent", return_value=result),
+              patch.object(scheduled, "stage", return_value=False),
+              patch.dict(scheduled.os.environ, SCHEMA=""),
+              patch.object(scheduled, "app_token", return_value=nullcontext("app")),
+              patch.object(scheduled, "close_nightly") as close):
+            scheduled.fix(target, "Fix the PR.")
+            self.assertEqual(close.call_args.args, (target, result["reason"], "app"))
+            allowed = close.call_args.kwargs["allowed"]
+            self.assertTrue(allowed())
+            check.return_value = (10, 3)
+            self.assertFalse(allowed())
 
 
 if __name__ == "__main__":
