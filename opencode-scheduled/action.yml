@@ -8,7 +8,7 @@ inputs:
     description: "Scheduled operation: triage, fix, recreate, improve, or exhaust."
     required: true
   phase:
-    description: "Candidate phase: plan, check, or publish. Not needed for exhaustion."
+    description: "Candidate phase: prepare-upstream, plan, check, or publish. Not needed for exhaustion."
     default: ""
   prompt:
     description: Repository-specific maintenance instructions.
@@ -28,6 +28,9 @@ inputs:
   candidate-dir:
     description: Directory outside the checkout for the candidate artifact.
     default: ""
+  upstream-repair:
+    description: Enable the PlaywrightEx upstream repair source and path policy.
+    default: "false"
 outputs:
   redo:
     description: Triage's validated redo decisions.
@@ -54,7 +57,7 @@ runs:
       id: run
       shell: bash
       env:
-        GH_TOKEN: ${{ github.token }}
+        GH_TOKEN: ${{ inputs.phase != 'prepare-upstream' && github.token || '' }}
         OPENCODE_API_KEY: ${{ steps.auth.outputs.token }}
         MODE: ${{ inputs.mode }}
         PROMPT: ${{ inputs.prompt }}
@@ -64,4 +67,5 @@ runs:
         PHASE: ${{ inputs.phase }}
         BASE_SHA: ${{ inputs.base-sha }}
         CANDIDATE_DIR: ${{ inputs.candidate-dir }}
+        UPSTREAM_REPAIR: ${{ inputs.upstream-repair }}
       run: python3 -I -B "$GITHUB_ACTION_PATH/scheduled.py"

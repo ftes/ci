@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from urllib.parse import quote, urlencode
@@ -27,6 +28,12 @@ UPSTREAM = r"upstream/[0-9]+\.[0-9]+\.[0-9]+"
 NIGHTLY = r"(?:opencode|claude)/nightly-[0-9]+(?:-[0-9]+)?"
 FAILURES = {"failure", "timed_out"}
 TOOL_ENV = ("PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "OPENCODE_API_KEY")
+PLAYWRIGHT_SOURCE = (
+    "packages/playwright-core/src", "packages/playwright/src", "packages/playwright/types",
+    "packages/protocol", "packages/isomorphic", "packages/utils", "packages/injected/src",
+    "docs/src/api", "tests/page", "tests/library", "tests/config", "tests/registry.md", "utils",
+)
+SOURCE_LIMIT = 48_000_000
 
 
 def require(condition, message):
@@ -365,7 +372,7 @@ def publish_answers(target, answers):
         subprocess.run(["bash", str(script)], env=env, check=True)
 
 
-def fix(target, result, patch, expected):
+def fix(target, result, patch, expected, *, upstream_repair=False):
     snapshot = check_fix(target)
     if not snapshot or ci_snapshot(snapshot) != expected:
         return
@@ -373,7 +380,7 @@ def fix(target, result, patch, expected):
     decision, answers = result["decision"], result["answers"]
     accept_fix(decision, answers, findings_manifest(number), target, bool(patch))
     if patch:
-        apply_patch(patch, "fix")
+        apply_patch(patch, "fix", upstream_repair=upstream_repair)
     if decision == "skip":
         if answers["threads"] and check_fix(target) == snapshot:
             publish_answers(target, answers)
@@ -413,7 +420,70 @@ def branch_prs(branch, token=None):
             if (pr["head"]["repo"] or {}).get("full_name") == REPO]
 
 
-def candidate_paths(mode, *revisions, env=None):
+def upstream_repair_version(mode, targets):
+    require(REPO == "ftes/playwright_ex" and mode == "fix" and len(targets) == 1
+            and re.fullmatch(UPSTREAM, targets[0]["branch"]), "Expected a PlaywrightEx upstream repair target")
+    version = targets[0]["branch"].removeprefix("upstream/")
+    require(git("show", "HEAD:DRIVER_VERSION") == version, "The draft's driver pin does not match its branch")
+    return version
+
+
+def source_file(name):
+    parts = name.split("/")
+    return (all(part and not part.startswith(".") and "\\" not in part and part.isprintable() for part in parts)
+            and "hooks" not in parts and ".config." not in parts[-1]
+            and any(name == root or name.startswith(root + "/") for root in PLAYWRIGHT_SOURCE)
+            and Path(name).suffix in {".ts", ".js", ".mjs", ".cjs", ".yml", ".yaml", ".md"})
+
+
+def prepare_upstream(version, artifact):
+    # Resolve a public release tag, fetch the exact commit, and never check it out.
+    remote = "https://github.com/microsoft/playwright.git"
+    ref = f"refs/tags/v{version}"
+    env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0")
+    refs = {name: sha for sha, name in (line.split() for line in
+            git("ls-remote", remote, ref, ref + "^{}", env=env).splitlines())}
+    sha = refs.get(ref + "^{}", refs.get(ref, ""))
+    require(re.fullmatch(HEX_SHA, sha), "No upstream release commit for the driver pin")
+    with tempfile.TemporaryDirectory() as temporary:
+        git("init", "--bare", "--quiet", cwd=temporary, env=env)
+        git("fetch", "--no-tags", "--depth=1", remote, sha, cwd=temporary, env=env)
+        require(git("rev-parse", "FETCH_HEAD^{commit}", cwd=temporary, env=env) == sha,
+                "Fetched release does not match the pinned upstream commit")
+        archive = Path(temporary) / "source.tar"
+        git("archive", "--format=tar", f"--output={archive}", sha, "--", *PLAYWRIGHT_SOURCE,
+            cwd=temporary, env=env)
+        artifact.parent.mkdir()
+        with tarfile.open(archive) as original, tarfile.open(artifact, "w") as snapshot:
+            for member in original:
+                if member.isfile() and source_file(member.name):
+                    entry = tarfile.TarInfo(member.name)
+                    entry.size = member.size
+                    snapshot.addfile(entry, original.extractfile(member))
+        require(artifact.stat().st_size <= SOURCE_LIMIT, "Upstream source snapshot is too large")
+    print(f"Prepared Playwright v{version} reference sources at {sha}")
+
+
+def stage_upstream(artifact, source):
+    require(artifact.is_file() and not artifact.is_symlink() and artifact.stat().st_size <= SOURCE_LIMIT,
+            "Invalid upstream source artifact")
+    temporary = source / "tmp"
+    require(not temporary.is_symlink(), "Expected planner context inside the workspace")
+    root = temporary / "upstream-source"
+    root.mkdir(parents=True)
+    with tarfile.open(artifact, "r:") as snapshot:
+        for member in snapshot:
+            require(member.type == tarfile.REGTYPE and source_file(member.name),
+                    "Unexpected upstream source entry")
+            file = root / member.name
+            file.parent.mkdir(parents=True, exist_ok=True)
+            with file.open("xb") as destination:
+                shutil.copyfileobj(snapshot.extractfile(member), destination)
+            file.chmod(0o444)
+    require((root / "tests/registry.md").is_file(), "Incomplete upstream source artifact")
+
+
+def candidate_paths(mode, *revisions, env=None, upstream_repair=False):
     changes = git("diff", "--raw", "--no-renames", "-z", *revisions, env=env)
     require(changes, "No changes to publish")
     entries = changes.rstrip("\0").split("\0")
@@ -422,13 +492,15 @@ def candidate_paths(mode, *revisions, env=None):
         roots = ("lib/", "test/") if mode == "improve" else (
             "lib/", "test/", "assets/", "priv/gettext/", "docs/", "guides/",
         )
-        require(name.startswith(roots) and not protected(name)
+        upstream_dev = upstream_repair and mode == "fix" and re.fullmatch(
+            r"dev/(?:playwright/upstream|mix/playwright/[a-z_]+|mix/tasks/playwright\.[a-z_.]+)\.ex", name)
+        require((name.startswith(roots) or upstream_dev) and not protected(name)
                 and not set(Path(name).parts).intersection({".git", ".gitattributes", ".gitmodules"})
                 and {old_mode, new_mode} <= {"000000", "100644", "100755"},
                 "A candidate may only change regular source, asset, documentation or test files")
 
 
-def plan_candidate(parent, mode, targets, prompt, candidate):
+def plan_candidate(parent, mode, targets, prompt, candidate, *, upstream_source=None):
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         source = root / "source"
@@ -455,6 +527,8 @@ def plan_candidate(parent, mode, targets, prompt, candidate):
                            mode, source=source)
         elif mode == "fix":
             target = targets[0]
+            if upstream_source:
+                stage_upstream(upstream_source, source)
             snapshot = check_fix(target, log_dir=source / "tmp")
             if not snapshot:
                 return
@@ -495,7 +569,7 @@ def plan_candidate(parent, mode, targets, prompt, candidate):
             require(bool(patch) == (mode != "triage" and result["decision"] == "publish"),
                     "Unexpected edits for the selected decision")
         if patch:
-            candidate_paths(mode, "--cached", env=env)
+            candidate_paths(mode, "--cached", env=env, upstream_repair=upstream_source is not None)
         candidate.mkdir()
         if patch:
             (candidate / "patch").write_bytes(patch)
@@ -519,12 +593,12 @@ def read_candidate(candidate):
     return contents["result"], contents["ci"], patch if patch.exists() else None
 
 
-def apply_patch(patch, mode, *, worktree=False):
+def apply_patch(patch, mode, *, worktree=False, upstream_repair=False):
     require(not git("status", "--porcelain"), "Expected a clean checkout for the candidate")
     # Applying to the index in the publisher keeps candidate files out of its worktree.
     git("-c", "core.fsmonitor=false", "apply", "--index" if worktree else "--cached", "--whitespace=nowarn",
         str(patch))
-    candidate_paths(mode, "--cached")
+    candidate_paths(mode, "--cached", upstream_repair=upstream_repair)
 
 
 def published_pr_matches(pr, branch, sha, parent):
@@ -640,14 +714,23 @@ def exhaust(targets):
 def main():
     mode = os.environ["MODE"]
     targets = json.loads(os.environ["TARGETS"])
+    phase = os.environ["PHASE"]
+    upstream_repair = os.environ.get("UPSTREAM_REPAIR") == "true"
     require(re.fullmatch(r"[\w.-]+/[\w.-]+", REPO), "Invalid repository")
-    require(BASE and BASE == json.loads(gh("api", f"repos/{REPO}"))["default_branch"], "Expected the default branch")
     for target in targets:
         validate_target(target)
+    if upstream_repair:
+        version = upstream_repair_version(mode, targets)
+        upstream_source = Path(os.environ["RUNNER_TEMP"]) / "scheduled-upstream" / "source.tar"
+        if phase == "prepare-upstream":
+            require(targets[0]["head"] == os.environ["BASE_SHA"] == git("rev-parse", "HEAD"),
+                    "Unexpected upstream source preparation checkout")
+            prepare_upstream(version, upstream_source)
+            return
+    require(BASE and BASE == json.loads(gh("api", f"repos/{REPO}"))["default_branch"], "Expected the default branch")
     if mode == "exhaust":
         exhaust(targets)
         return
-    phase = os.environ["PHASE"]
     require(mode in ("triage", "fix", "recreate", "improve") and phase in ("plan", "check", "publish"),
             "Unknown scheduled mode or phase")
     require((mode == "triage" or len(targets) == (0 if mode == "improve" else 1))
@@ -661,17 +744,18 @@ def main():
     require(candidate.is_absolute() and candidate.parent == Path(os.environ["RUNNER_TEMP"]),
             "Expected a candidate directory directly under the runner temporary directory")
     if phase == "plan":
-        plan_candidate(parent, mode, targets, os.environ["PROMPT"], candidate)
+        plan_candidate(parent, mode, targets, os.environ["PROMPT"], candidate,
+                       upstream_source=upstream_source if upstream_repair else None)
         return
     result, ci, patch = read_candidate(candidate)
     if phase == "check":
         require(mode != "triage" and patch, "Expected a patch to check")
-        apply_patch(patch, mode, worktree=True)
+        apply_patch(patch, mode, worktree=True, upstream_repair=upstream_repair)
     elif mode == "triage":
         require(not patch, "Triage does not edit files")
         triage(targets, result)
     elif mode == "fix":
-        fix(targets[0], result, patch, ci)
+        fix(targets[0], result, patch, ci, upstream_repair=upstream_repair)
     else:
         publish(targets, mode, result, patch)
 

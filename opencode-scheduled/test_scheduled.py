@@ -1,7 +1,9 @@
 import json
 from contextlib import chdir, nullcontext
+from io import BytesIO
 from pathlib import Path
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -10,6 +12,58 @@ import scheduled
 
 
 class ScheduledTest(unittest.TestCase):
+    def test_upstream_repair_scope_is_limited_to_playwright_port_sources(self):
+        targets = [{"branch": "upstream/1.65.1"}]
+        with (patch.object(scheduled, "REPO", "ftes/playwright_ex"),
+              patch.object(scheduled, "git", return_value="1.65.1")):
+            self.assertEqual(scheduled.upstream_repair_version("fix", targets), "1.65.1")
+            with self.assertRaisesRegex(ValueError, "PlaywrightEx upstream repair target"):
+                scheduled.upstream_repair_version("fix", [{"branch": "opencode/nightly-1"}])
+        for name in ("dev/mix/tasks/playwright.gen.api.ex", "dev/mix/playwright/api_rules.ex",
+                     "dev/playwright/upstream.ex"):
+            with patch.object(scheduled, "git", return_value=f":100644 100644 a b M\0{name}\0"):
+                scheduled.candidate_paths("fix", "--cached", upstream_repair=True)
+                with self.assertRaises(ValueError):
+                    scheduled.candidate_paths("fix", "--cached")
+        for name in ("dev/helper.ex", "dev/mix/tasks/other.ex", "dev/mix/playwright/.git/config"):
+            with patch.object(scheduled, "git", return_value=f":100644 100644 a b M\0{name}\0"):
+                with self.assertRaises(ValueError):
+                    scheduled.candidate_paths("fix", "--cached", upstream_repair=True)
+
+    def test_upstream_context_only_materializes_read_only_regular_reference_files(self):
+        entries = (("tests/registry.md", tarfile.REGTYPE),
+                   ("tests/page/../../escape.ts", tarfile.REGTYPE),
+                   ("tests/page/.git/config.ts", tarfile.REGTYPE),
+                   ("tests/page/link.ts", tarfile.SYMTYPE),
+                   ("tests/page/build.config.ts", tarfile.REGTYPE),
+                   ("tests/page/hooks/post-checkout.js", tarfile.REGTYPE))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = root / "source.tar"
+            for index, (name, kind) in enumerate(entries):
+                with self.subTest(name=name), tarfile.open(artifact, "w") as snapshot:
+                    entry = tarfile.TarInfo(name)
+                    entry.type = kind
+                    entry.linkname = "/tmp/outside" if kind == tarfile.SYMTYPE else ""
+                    data = b"registry" if kind == tarfile.REGTYPE else b""
+                    entry.size = len(data)
+                    snapshot.addfile(entry, BytesIO(data))
+                source = root / str(index)
+                if index == 0:
+                    scheduled.stage_upstream(artifact, source)
+                    registry = source / "tmp/upstream-source/tests/registry.md"
+                    self.assertEqual(registry.read_bytes(), b"registry")
+                    self.assertEqual(registry.stat().st_mode & 0o777, 0o444)
+                else:
+                    with self.assertRaisesRegex(ValueError, "Unexpected upstream source entry"):
+                        scheduled.stage_upstream(artifact, source)
+            source = root / "symlink"
+            source.mkdir()
+            (source / "tmp").symlink_to(root, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "inside the workspace"):
+                scheduled.stage_upstream(artifact, source)
+            self.assertFalse((root / "upstream-source").exists())
+
     def test_improvement_model_has_no_shell_or_project_integrations(self):
         def run(*args, **options):
             settings = json.loads(options["env"]["OPENCODE_CONFIG_CONTENT"])
