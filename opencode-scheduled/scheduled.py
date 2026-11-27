@@ -2,7 +2,6 @@
 
 import base64
 import contextlib
-import io
 import json
 import os
 from pathlib import Path
@@ -10,7 +9,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 from urllib.parse import quote, urlencode
@@ -193,7 +191,7 @@ def ci_snapshot(snapshot):
 
 
 def findings_manifest(number):
-    path = Path(f"tmp/review-threads/{number}.json")
+    path = Path(os.environ.get("REVIEW_THREADS_DIR") or "tmp/review-threads") / f"{number}.json"
     return json.loads(path.read_text()) if os.environ["SCHEMA"] and path.is_file() else []
 
 
@@ -431,14 +429,21 @@ def candidate_paths(mode, *revisions, env=None):
 
 
 def plan_candidate(parent, mode, targets, prompt, candidate):
-    # Export the pinned tree without Git metadata. No repo command runs in the model job.
-    archive = subprocess.check_output(["git", "archive", "--format=tar", parent])
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         source = root / "source"
         source.mkdir()
-        with tarfile.open(fileobj=io.BytesIO(archive)) as files:
-            files.extractall(source, filter="data")
+        # Use a private index to materialize the pinned tree without archive attributes or .git.
+        env = dict(os.environ, GIT_DIR=git("rev-parse", "--absolute-git-dir"), GIT_WORK_TREE=str(source),
+                   GIT_INDEX_FILE=str(root / "index"), GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+        git("read-tree", parent, env=env)
+        git("checkout-index", "--all", env=env, cwd=source)
+        resolved_source = source.resolve()
+        for path in source.rglob("*"):
+            if path.is_symlink():
+                require(not path.readlink().is_absolute()
+                        and Path(os.path.realpath(path)).is_relative_to(resolved_source),
+                        "The pinned checkout contains a symlink outside the model workspace")
         expected_ci = None
         if mode == "triage":
             active = [target for target in targets if current(target)]
@@ -459,7 +464,8 @@ def plan_candidate(parent, mode, targets, prompt, candidate):
             if listed:
                 path = Path(f"tmp/review-threads/{number}.md")
                 (source / path.parent).mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(path, source / path)
+                directory = Path(os.environ.get("REVIEW_THREADS_DIR") or path.parent)
+                shutil.copyfile(directory / path.name, source / path)
             if target.get("answer_only"):
                 if not listed:
                     return
@@ -479,10 +485,6 @@ def plan_candidate(parent, mode, targets, prompt, candidate):
                     "Invalid publication decision")
             if result["decision"] == "skip":
                 return
-        # Stage in a separate index the model never sees, using the untouched checkout's Git config.
-        env = dict(os.environ, GIT_DIR=git("rev-parse", "--absolute-git-dir"), GIT_WORK_TREE=str(source),
-                   GIT_INDEX_FILE=str(root / "index"), GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
-        git("read-tree", parent, env=env)
         git("-c", "core.fsmonitor=false", "add", "-A", "--", ".", ":(exclude)tmp", env=env)
         patch = subprocess.check_output(
             ["git", "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv"], env=env,
@@ -525,12 +527,11 @@ def apply_patch(patch, mode, *, worktree=False):
     candidate_paths(mode, "--cached")
 
 
-def require_published_pr(pr, branch, sha, parent):
-    require(pr["head"]["sha"] == sha and pr["head"]["ref"] == branch
+def published_pr_matches(pr, branch, sha, parent):
+    return (pr["head"]["sha"] == sha and pr["head"]["ref"] == branch
             and (pr["head"]["repo"] or {}).get("full_name") == REPO
             and pr["base"]["sha"] == parent and pr["base"]["ref"] == BASE
-            and pr["base"]["repo"]["full_name"] == REPO and bot_login(pr, {BOT}),
-            "Publication PR does not match the validated branch, head and base")
+            and pr["base"]["repo"]["full_name"] == REPO and bot_login(pr, {BOT}))
 
 
 def verify_recovery(sha, parent, title, message, tree):
@@ -539,7 +540,9 @@ def verify_recovery(sha, parent, title, message, tree):
             and record["author"]["email"] == BOT_EMAIL
             and [item["sha"] for item in record["parents"]] == [parent]
             and record["tree"]["sha"] == tree,
-            "Existing branch does not match the checked candidate; leaving it alone")
+            "Existing branch does not match the checked candidate; leaving it alone. "
+            "If a push succeeded but PR creation failed, retry only the failed publisher "
+            "while the original checked artifact is still available.")
 
 
 def publish(targets, mode, result, patch):
@@ -589,9 +592,6 @@ def publish(targets, mode, result, patch):
         if live:
             pr = live[0]
             require(len(live) == 1, "Expected one matching publication PR")
-            require_published_pr(pr, branch, sha, parent)
-            if pr["state"] != "open":
-                return
         else:
             if remote_head(BASE) != parent or remote_head(branch) != sha or (target and not current(target)):
                 return
@@ -599,15 +599,25 @@ def publish(targets, mode, result, patch):
                 return
             pr = api("pulls", method="POST", token=token,
                      payload={"head": branch, "base": BASE, "title": title, "body": body, "draft": False})
-            require_published_pr(pr, branch, sha, parent)
+        require(published_pr_matches(pr, branch, sha, parent),
+                "Publication PR does not match the validated branch, head and base")
+        if pr["state"] != "open":
+            return
+        if not live:
             require(remote_head(BASE) == parent and remote_head(branch) == sha,
                     "A branch moved during PR creation; leaving the PR for a maintainer")
         print(pr["html_url"])
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
             print(f"Published {pr['html_url']}", file=summary)
         if target:
+            def replacement_current():
+                if remote_head(BASE) != parent:
+                    return False
+                replacement = api(f"pulls/{pr['number']}", token=token)
+                return replacement["state"] == "open" and published_pr_matches(replacement, branch, sha, parent)
+
             close(target, f"Redone on current {BASE}; replaced by {pr['html_url']}.", token,
-                  allowed=lambda: remote_head(BASE) == parent)
+                  allowed=replacement_current)
 
 
 def nightly_open():

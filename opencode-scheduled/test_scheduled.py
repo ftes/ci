@@ -1,6 +1,7 @@
 import json
 from contextlib import chdir, nullcontext
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -37,14 +38,22 @@ class ScheduledTest(unittest.TestCase):
                 (repo / "lib").mkdir()
                 source = repo / "lib" / "file.ex"
                 source.write_text("old\n")
-                scheduled.git("add", "lib/file.ex")
+                (repo / "lib/retained.ex").write_text("keep\n")
+                (repo / "lib/removed.ex").write_text("remove\n")
+                (repo / "lib/version.ex").write_text('$Format:%H$\n')
+                (repo / ".gitattributes").write_text("lib/retained.ex export-ignore\n"
+                                                     "lib/version.ex export-subst\n")
+                scheduled.git("add", ".")
                 scheduled.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
                               "-c", "commit.gpgsign=false", "commit", "-m", "Base")
                 parent = scheduled.git("rev-parse", "HEAD")
 
                 def edit(*args, source):
                     self.assertFalse((source / ".git").exists())
+                    self.assertEqual((source / "lib/retained.ex").read_text(), "keep\n")
+                    self.assertEqual((source / "lib/version.ex").read_text(), '$Format:%H$\n')
                     (source / "lib" / "file.ex").write_text("new\n")
+                    (source / "lib/removed.ex").unlink()
                     return {"decision": "publish", "title": "Simplify source", "body": "Change source."}
 
                 with (patch.object(scheduled, "agent", side_effect=edit),
@@ -59,7 +68,44 @@ class ScheduledTest(unittest.TestCase):
                 scheduled.apply_patch(patch_file, "improve")
                 self.assertEqual(result["title"], "Simplify source")
                 self.assertEqual(scheduled.git("show", ":lib/file.ex"), "new")
+                self.assertEqual(scheduled.git("diff", "--cached", "--name-status"),
+                                 "M\tlib/file.ex\nD\tlib/removed.ex")
                 self.assertEqual(source.read_text(), "old\n")
+
+    def test_review_listing_and_answers_keep_the_publisher_checkout_clean(self):
+        scripts = Path(__file__).resolve().parent.parent / "review-threads"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            repo.mkdir()
+            threads = root / "scheduled-review-threads"
+            output = root / "output"
+            gh = root / "gh"
+            gh.write_text("""#!/usr/bin/env bash
+case "$*" in
+  *addPullRequestReviewThreadReply*) echo reply ;;
+  *) cat <<'JSON'
+{"id":"thread","path":"lib/file.ex","line":1,"comments":{"nodes":[{"id":"root","author":{"login":"coderabbitai"},"body":"Fix this"}]}}
+JSON
+     ;;
+esac
+""")
+            gh.chmod(0o755)
+            answers = {"threads": [{"id": "thread", "fixed": False, "reply": "Explained."}]}
+            env = {"REVIEW_THREADS_DIR": str(threads), "GITHUB_OUTPUT": str(output),
+                   "PRS": "2", "REPO": "owner/project", "AUTHORS": "coderabbitai",
+                   "ANSWERER": "github-actions", "MAX_ANSWERS": "2",
+                   "SCHEMA": "enabled", "PR": "2", "ANSWERS": json.dumps(answers),
+                   "PATH": f"{root}:{scheduled.os.environ['PATH']}"}
+            with chdir(repo), patch.dict(scheduled.os.environ, env):
+                scheduled.git("init", "--quiet")
+                subprocess.run(["bash", scripts / "list.sh"], check=True, capture_output=True)
+                self.assertEqual(scheduled.git("status", "--porcelain"), "")
+                self.assertEqual(output.read_text(), "open=[2]\n")
+                self.assertTrue((threads / "2.md").is_file())
+                scheduled.validate_answers(answers, scheduled.findings_manifest(2))
+                reply = subprocess.check_output(["bash", scripts / "answer.sh"], text=True)
+                self.assertIn("Thread thread: declined", reply)
 
     def test_improvement_rejects_git_metadata_and_symlinks(self):
         for diff in (
@@ -86,16 +132,53 @@ class ScheduledTest(unittest.TestCase):
               patch.object(scheduled, "git", side_effect=[parent, "different-tree", parent, "checked-tree"]),
               patch.object(scheduled, "api", return_value=record) as api,
               patch.object(scheduled, "app_token", return_value=nullcontext("app")) as token,
-              patch.object(scheduled, "require_published_pr"),
+              patch.object(scheduled, "published_pr_matches", return_value=True),
               patch.object(scheduled, "apply_patch") as applied):
-            with self.assertRaisesRegex(ValueError, "does not match the checked candidate"):
+            with self.assertRaisesRegex(ValueError, "retry only the failed publisher .*artifact is still available"):
                 scheduled.publish([], "improve", result, Path("candidate-b.patch"))
             applied.assert_called_once_with(Path("candidate-b.patch"), "improve")
             token.assert_not_called()
-            api.side_effect = [record, {"html_url": "https://example.invalid/pr"}]
+            api.side_effect = [record, {"state": "open", "html_url": "https://example.invalid/pr"}]
             scheduled.publish([], "improve", result, Path("candidate-a.patch"))
             applied.assert_called_with(Path("candidate-a.patch"), "improve")
             self.assertEqual(api.call_args.kwargs["method"], "POST")
+
+    def test_original_stays_open_if_replacement_changes_after_the_close_comment(self):
+        repo, parent, head = "owner/project", "a" * 40, "b" * 40
+        target = {"number": 2, "branch": "opencode/nightly-1", "head": "c" * 40}
+        branch = "opencode/nightly-123-2"
+        replacement = {"number": 3, "state": "open", "html_url": "https://example.invalid/pr",
+                       "merged_at": None, "user": {"type": "Bot", "login": scheduled.BOT},
+                       "head": {"ref": branch, "sha": head, "repo": {"full_name": repo}},
+                       "base": {"ref": "main", "sha": parent, "repo": {"full_name": repo}}}
+        result = {"decision": "publish", "title": "Replace", "body": "Updated."}
+        changes = {"closed": {"state": "closed"},
+                   "head moved": {"head": replacement["head"] | {"sha": "d" * 40}},
+                   "base moved": {"base": replacement["base"] | {"sha": "e" * 40}},
+                   "unchanged": {}}
+        for recover in (False, True):
+            for name, change in changes.items():
+                heads = {"main": parent, branch: head if recover else None}
+                with (self.subTest(recover=recover, change=name),
+                      patch.dict(scheduled.os.environ, GITHUB_RUN_ID="123", GITHUB_STEP_SUMMARY="/dev/null"),
+                      patch.object(scheduled, "BASE", "main"), patch.object(scheduled, "REPO", repo),
+                      patch.object(scheduled, "remote_head", side_effect=heads.get),
+                      patch.object(scheduled, "current", return_value=True),
+                      patch.object(scheduled, "branch_prs", return_value=[replacement] if recover else []),
+                      patch.object(scheduled, "apply_patch"), patch.object(scheduled, "verify_recovery"),
+                      patch.object(scheduled, "commit"),
+                      patch.object(scheduled, "push", side_effect=lambda branch, *_: heads.update({branch: head})),
+                      patch.object(scheduled, "git", side_effect=[parent, "tree" if recover else head]),
+                      patch.object(scheduled, "app_token", return_value=nullcontext("app")),
+                      patch.object(scheduled, "api") as api):
+                    api.side_effect = [
+                        *([] if recover else [replacement]),
+                        replacement, [], {}, replacement | change, {"state": "closed"},
+                    ]
+                    scheduled.publish([target], "recreate", result, Path("candidate.patch"))
+                    api.assert_any_call("pulls/3", token="app")
+                    writes = [call for call in api.call_args_list if call.kwargs.get("method") == "PATCH"]
+                    self.assertEqual([call.args for call in writes], [] if change else [("pulls/2",)])
 
     def test_ci_ignores_other_heads_and_uses_only_the_latest_attempt(self):
         target = {"number": 2, "branch": "opencode/nightly-1", "head": "a" * 40}

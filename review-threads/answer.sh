@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Answers a PR's open review threads (answer/action.yml) from Claude's `threads`: a reply to each,
 # and on a fixed one a temporary 👍 on the reply until the thread is resolved. Only threads list.sh wrote to
-# tmp/review-threads/<PR>.json, each once. Env: GH_TOKEN, PR, ANSWERS.
+# <PR>.json in tmp/review-threads (or REVIEW_THREADS_DIR), each once. Env: GH_TOKEN, PR, ANSWERS.
 # shellcheck disable=SC2016 # $ in single quotes is GraphQL or jq, not shell.
 set -euo pipefail
 
 [[ $PR =~ ^[0-9]+$ ]] || { echo "::error::pr: a PR number, got: $PR"; exit 1; }
-listed=tmp/review-threads/$PR.json
+listed=${REVIEW_THREADS_DIR:-tmp/review-threads}/$PR.json
 [[ -f $listed ]] || { echo "::error::No $listed: run ftes/ci/review-threads for PR $PR first."; exit 1; }
 
 # Claude's answer is data: listed threads only, a reply cut to 3000 characters, `fixed` a boolean.

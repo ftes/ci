@@ -6,11 +6,11 @@
 # A thread ANSWERER answered as fixed (its reaction on its last reply) but couldn't resolve is
 # resolved here. Writes to
 # $GITHUB_OUTPUT `open`, the PRs with at least one open thread, as a JSON array.
-# Env: GH_TOKEN, REPO, PRS, AUTHORS, ANSWERER, MAX_ANSWERS.
+# Env: GH_TOKEN, REPO, PRS, AUTHORS, ANSWERER, MAX_ANSWERS, optional REVIEW_THREADS_DIR.
 # shellcheck disable=SC2016 # $ in single quotes is GraphQL or jq, not shell.
 set -euo pipefail
 
-dir=tmp/review-threads
+dir=${REVIEW_THREADS_DIR:-tmp/review-threads}
 mkdir -p "$dir"
 open=()
 default_base=
