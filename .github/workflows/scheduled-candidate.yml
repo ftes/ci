@@ -59,13 +59,13 @@ jobs:
       - id: threads
         if: inputs.review-pr != ''
         continue-on-error: true
-        uses: ftes/ci/review-threads@59d6dbe9d7c46e313d55a01e88f0ef79c4e0ea54
+        uses: ftes/ci/review-threads@6f19156052da99a0cf42268f5d9fd19f437e6b01
         with:
           prs: ${{ inputs.review-pr }}
           authors: claude opencode-agent coderabbitai
           recover: false
       - id: plan
-        uses: ftes/ci/opencode-scheduled@59d6dbe9d7c46e313d55a01e88f0ef79c4e0ea54
+        uses: ftes/ci/opencode-scheduled@6f19156052da99a0cf42268f5d9fd19f437e6b01
         with:
           phase: plan
           mode: ${{ inputs.mode }}
@@ -114,7 +114,7 @@ jobs:
           artifact-ids: ${{ needs.plan.outputs.artifact }}
           path: ${{ runner.temp }}/scheduled-candidate
           merge-multiple: true
-      - uses: ftes/ci/opencode-scheduled@59d6dbe9d7c46e313d55a01e88f0ef79c4e0ea54
+      - uses: ftes/ci/opencode-scheduled@6f19156052da99a0cf42268f5d9fd19f437e6b01
         with:
           phase: check
           mode: ${{ inputs.mode }}
@@ -187,7 +187,7 @@ jobs:
       - id: threads
         if: inputs.review-pr != ''
         continue-on-error: true
-        uses: ftes/ci/review-threads@59d6dbe9d7c46e313d55a01e88f0ef79c4e0ea54
+        uses: ftes/ci/review-threads@6f19156052da99a0cf42268f5d9fd19f437e6b01
         env:
           REVIEW_THREADS_DIR: ${{ runner.temp }}/scheduled-review-threads
         with:
@@ -195,7 +195,7 @@ jobs:
           authors: claude opencode-agent coderabbitai
           require-snapshot: true
       - id: publish
-        uses: ftes/ci/opencode-scheduled@59d6dbe9d7c46e313d55a01e88f0ef79c4e0ea54
+        uses: ftes/ci/opencode-scheduled@6f19156052da99a0cf42268f5d9fd19f437e6b01
         env:
           REVIEW_THREADS_DIR: ${{ runner.temp }}/scheduled-review-threads
         with:
