@@ -47,6 +47,14 @@ class ScheduledTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "budget is exhausted"):
             scheduled.accept_fix("fix", answers, listed, target, changed=True)
 
+    def test_answers_cannot_request_takeover(self):
+        listed = [{"id": "known"}]
+        answers = {"threads": [{"id": "known", "fixed": False, "reply": "  Needs a human: please check."}]}
+        with self.assertRaisesRegex(ValueError, "reserved takeover prefix"):
+            scheduled.validate_answers(answers, listed)
+        answers["threads"][0]["reply"] = "This still needs a maintainer to check."
+        scheduled.validate_answers(answers, listed)
+
     def test_exhaust_leases_deletion_to_the_validated_closed_head(self):
         target = {"number": 2, "branch": "opencode/nightly-1", "head": "a" * 40}
         with (patch.object(scheduled, "current", return_value={"commits": 3}) as current,

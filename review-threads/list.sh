@@ -13,6 +13,7 @@ set -euo pipefail
 dir=tmp/review-threads
 mkdir -p "$dir"
 open=()
+default_base=
 for pr in $PRS; do
   [[ $pr =~ ^[0-9]+$ ]] || { echo "::error::prs: PR numbers, got: $pr"; exit 1; }
   # The viewer is the same GitHub Actions bot that posts the reply and the reaction.
@@ -71,11 +72,18 @@ for pr in $PRS; do
       echo "::warning::Thread $id: prior reply has no published head; left open for a maintainer."
       continue
     fi
-    if [[ -n $snapshot ]] &&
-      ! BASE="${BASE_BRANCH:-}" SCHEDULED_TARGET="$snapshot" \
+    if [[ -n $snapshot ]]; then
+      if [[ -z $default_base ]]; then
+        if ! default_base=$(gh api "repos/$REPO" --jq '.default_branch // empty') || [[ -z $default_base ]]; then
+          echo "::warning::Thread $id: couldn't read the default branch; left open for a maintainer."
+          continue
+        fi
+      fi
+      if ! BASE="$default_base" SCHEDULED_TARGET="$snapshot" \
         python3 -I -B "${BASH_SOURCE[0]%/*}/../opencode-scheduled/scheduled.py" check-answer; then
-      echo "::warning::Thread $id: prior fix was for a stale snapshot or the PR was taken over; left open for a maintainer."
-      continue
+        echo "::warning::Thread $id: prior fix was for a stale snapshot or the PR was taken over; left open for a maintainer."
+        continue
+      fi
     fi
     if gh api graphql -f thread="$id" -f query='
         mutation($thread: ID!) { resolveReviewThread(input: {threadId: $thread}) { thread { isResolved } } }' > /dev/null; then

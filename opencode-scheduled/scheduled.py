@@ -348,7 +348,8 @@ def validate_answers(result, listed):
         require(answer["id"] in allowed and answer["id"] not in seen and type(answer["fixed"]) is bool,
                 "Unexpected review finding")
         seen.add(answer["id"])
-        text(answer["reply"], 3000)
+        reply = text(answer["reply"], 3000)
+        require(not reply.startswith("Needs a human:"), "Review reply uses the reserved takeover prefix")
     require(seen == allowed, "Expected exactly one answer per listed finding")
 
 
