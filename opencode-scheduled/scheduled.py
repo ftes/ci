@@ -87,14 +87,14 @@ def remote_head(branch):
     return next((entry["object"]["sha"] for entry in refs if entry["ref"] == ref(branch)), None)
 
 
-def push(branch, token, expected, source="HEAD"):
+def push(branch, token, expected, source="HEAD", *, cwd=None):
     auth = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     print(f"::add-mask::{auth}", flush=True)
     env = dict(os.environ, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="http.https://github.com/.extraheader",
                GIT_CONFIG_VALUE_0=f"Authorization: Basic {auth}", GIT_TERMINAL_PROMPT="0")
-    git("check-ref-format", ref(branch))
+    git("check-ref-format", ref(branch), cwd=cwd)
     git("push", f"--force-with-lease={ref(branch)}:{expected}", f"https://github.com/{REPO}.git",
-        f"{source}:{ref(branch)}", env=env)
+        f"{source}:{ref(branch)}", env=env, cwd=cwd)
 
 
 def text(value, limit, *, multiline=True):
@@ -120,12 +120,12 @@ def bot_login(item, allowed):
     return user.get("type") == "Bot" and user.get("login") in allowed
 
 
-def current(target):
+def current(target, *, state="open"):
     """Check the exact PR and commit plus the maintainers' takeover signals."""
     validate_target(target)
     number, branch, head = (target[key] for key in ("number", "branch", "head"))
     pr = api(f"pulls/{number}")
-    if (pr["state"] != "open" or not bot_login(pr, WRITERS)
+    if (pr["state"] != state or not bot_login(pr, WRITERS)
             or pr["head"]["ref"] != branch or pr["head"]["sha"] != head
             or (pr["head"]["repo"] or {}).get("full_name") != REPO
             or pr["base"]["ref"] != BASE or pr["base"]["repo"]["full_name"] != REPO):
@@ -163,7 +163,10 @@ def ci_failure(target):
 
 
 def check_fix(target, *, save_log=False):
-    if not current(target) or git("rev-parse", "HEAD") != target["head"]:
+    pr = current(target)
+    if not pr or git("rev-parse", "HEAD") != target["head"]:
+        return False
+    if re.fullmatch(NIGHTLY, target["branch"]) and pr["commits"] >= 3 and not target.get("answer_only"):
         return False
     failure = ci_failure(target)
     if bool(failure) != target["failing"]:
@@ -288,7 +291,9 @@ def close(target, reason, token, *, allowed=None):
     if not any(bot_login(item, {BOT}) and item["body"] == reason for item in api(comments, paginate=True)):
         api(comments, token=token, method="POST", payload={"body": reason})
     if current(target) and (allowed is None or allowed()):
-        api(f"pulls/{number}", token=token, method="PATCH", payload={"state": "closed"})
+        pr = api(f"pulls/{number}", token=token, method="PATCH", payload={"state": "closed"})
+        return pr["state"] == "closed"
+    return False
 
 
 def triage(targets, prompt):
@@ -328,6 +333,30 @@ def validate_answers(result, listed):
                 "Unexpected review finding")
         seen.add(answer["id"])
         text(answer["reply"], 3000)
+    require(seen == allowed, "Expected exactly one answer per listed finding")
+
+
+def accept_fix(decision, answers, listed, target, changed):
+    require(decision in ("fix", "retry", "give-up", "skip"), "Invalid fix decision")
+    require(not target.get("answer_only") or decision == "skip",
+            "The fix budget is exhausted; only unchanged answers are allowed")
+    require(decision != "retry" or target["failing"], "A passing run does not need a retry")
+    validate_answers(answers, [] if decision == "give-up" else listed)
+    if decision == "fix":
+        require(changed, "No fix to publish")
+    if decision in ("retry", "skip"):
+        require(not changed, f"{decision} requires an unchanged checkout")
+    if decision == "skip" and target["failing"]:
+        require(not any(answer["fixed"] for answer in answers["threads"]),
+                "Cannot resolve findings while CI still fails without a fix")
+
+
+def publish_answers(target, answers):
+    if answers["threads"]:
+        script = Path(__file__).resolve().parent.parent / "review-threads" / "answer.sh"
+        env = dict(os.environ, PR=str(target["number"]), ANSWERS=json.dumps(answers),
+                   SCHEDULED_TARGET=json.dumps(target))
+        subprocess.run(["bash", str(script)], env=env, check=True)
 
 
 def fix(target, prompt):
@@ -338,21 +367,24 @@ def fix(target, prompt):
     number, parent, branch = (target[key] for key in ("number", "head", "branch"))
     manifest = Path(f"tmp/review-threads/{number}.json")
     listed = json.loads(manifest.read_text()) if os.environ["SCHEMA"] and manifest.is_file() else []
+    answer_only = target.get("answer_only", False)
+    if answer_only and not listed:
+        return
+    if answer_only:
+        prompt += ("\nThe fix budget is exhausted. Do not edit anything. Return skip and answer every listed "
+                   "finding. Mark fixed only if the checked-out code already addresses it. Leave findings "
+                   "that still need code changes open for a maintainer and say so in the reply.")
     findings = f"tmp/review-threads/{number}.md" if listed else "none; return an empty threads list"
     result = agent(f"{prompt}\n{context}\nPR: {number}; CI failed: {target['failing']}; findings: {findings}.",
                    '{"decision":"fix|retry|give-up|skip","title":"commit subject",'
                    '"reason":"give-up explanation","answers":{"threads":[]}}', "fix")
     decision = result["decision"]
     answers = result["answers"]
-    require(decision in ("fix", "retry", "give-up", "skip"), "Invalid fix decision")
-    require(decision != "retry" or target["failing"], "A passing run does not need a retry")
-    validate_answers(answers, listed)
     changed = stage(parent, upstream=bool(re.fullmatch(UPSTREAM, branch)))
-    if decision == "fix":
-        require(changed, "No fix to publish")
-    if decision == "retry":
-        require(not changed, "A retry may not publish edits")
-    if decision == "skip" and not answers["threads"]:
+    accept_fix(decision, answers, listed, target, changed)
+    if decision == "skip":
+        if answers["threads"] and check_fix(target) == snapshot:
+            publish_answers(target, answers)
         return
     with app_token() as token:
         if check_fix(target) != snapshot:
@@ -371,10 +403,7 @@ def fix(target, prompt):
             head = commit(title, "", parent, allow_empty=decision == "retry")
             push(branch, token, parent)
             target = target | {"head": head}
-        elif any(answer["fixed"] for answer in answers.get("threads", [])):
-            require(not target["failing"], "Cannot resolve findings while CI still fails without a fix")
-        if answers["threads"] and current(target):
-            output("answers", answers)
+    publish_answers(target, answers)
 
 
 def branch_prs(branch, token=None):
@@ -478,11 +507,23 @@ def nightly_open():
 
 def exhaust(targets):
     for target in targets:
+        require(re.fullmatch(NIGHTLY, target["branch"]), "Expected a nightly branch")
         pr = current(target)
-        if not pr or pr["commits"] < 3 or not ci_failure(target):
+        failure = ci_failure(target) if pr and pr["commits"] >= 3 else None
+        if not failure:
             continue
         with app_token() as token:
-            close(target, "CI still fails after two automatic fixes.", token, allowed=lambda: ci_failure(target))
+            closed = close(target, "CI still fails after two automatic fixes.", token,
+                           allowed=lambda: ci_failure(target) == failure)
+            if closed and current(target, state="closed") and remote_head(target["branch"]) == target["head"]:
+                with tempfile.TemporaryDirectory() as repository:
+                    git("init", "--quiet", "--bare", repository)
+                    try:
+                        push(target["branch"], token, target["head"], source="", cwd=repository)
+                    except subprocess.CalledProcessError:
+                        if remote_head(target["branch"]) == target["head"]:
+                            raise
+                        print("The exhausted branch moved or was removed; leaving it alone.")
 
 
 def main():
@@ -508,7 +549,10 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        if sys.argv[1:] == ["check-answer"]:
+            sys.exit(0 if current(json.loads(os.environ["SCHEDULED_TARGET"])) else 1)
+        else:
+            main()
     except subprocess.CalledProcessError as error:
         sys.exit(f"Scheduled command failed with exit code {error.returncode}")
     except (KeyError, ValueError) as error:

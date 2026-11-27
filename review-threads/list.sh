@@ -60,11 +60,19 @@ for pr in $PRS; do
           | select(.pending or (.comments[-1].author != $answerer))
           | select(.pending or ([.comments[] | select(.author == $answerer)] | length < $max))
            | {id, pending, pending_reply: (if .pending then .comments[-1].id else null end),
+              snapshot: (if .pending then (.comments[-1].body | [capture("<!-- scheduled-review-snapshot: (?<target>[^\\n]+) -->$").target] | first) else null end),
               path, line: (.line // .originalLine), outdated: .isOutdated, root: .comments[0].id,
              comments: (.comments | map({author, body: (.body | gsub("<!--[\\s\\S]*?-->"; "") | gsub("<picture>[\\s\\S]*?</picture>"; "") | .[:6000])}))})' \
       > "$dir/$pr.all.json"
   for id in $(jq -r '.[] | select(.pending) | .id' "$dir/$pr.all.json"); do
     reply=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .pending_reply' "$dir/$pr.all.json")
+    snapshot=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .snapshot // empty' "$dir/$pr.all.json")
+    if [[ -n $snapshot ]] &&
+      ! BASE="${BASE_BRANCH:-}" SCHEDULED_TARGET="$snapshot" \
+        python3 -I -B "${BASH_SOURCE[0]%/*}/../opencode-scheduled/scheduled.py" check-answer; then
+      echo "::warning::Thread $id: prior fix was for a stale snapshot or the PR was taken over; left open for a maintainer."
+      continue
+    fi
     if gh api graphql -f thread="$id" -f query='
         mutation($thread: ID!) { resolveReviewThread(input: {threadId: $thread}) { thread { isResolved } } }' > /dev/null; then
       echo "Thread $id: answered as fixed earlier, resolved now."
@@ -76,7 +84,7 @@ for pr in $PRS; do
       echo "::warning::Couldn't resolve thread $id, answered as fixed earlier."
     fi
   done
-  jq 'map(select(.pending | not) | del(.pending, .pending_reply))' "$dir/$pr.all.json" > "$dir/$pr.json"
+  jq 'map(select(.pending | not) | del(.pending, .pending_reply, .snapshot))' "$dir/$pr.all.json" > "$dir/$pr.json"
   rm "$dir/$pr.all.json"
   count=$(jq length "$dir/$pr.json")
   echo "PR $pr: $count open review threads"

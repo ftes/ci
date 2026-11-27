@@ -26,9 +26,6 @@ outputs:
   redo:
     description: Triage's validated redo decisions.
     value: ${{ steps.run.outputs.redo }}
-  answers:
-    description: Validated review findings answers.
-    value: ${{ steps.run.outputs.answers }}
   active:
     description: Whether the fix snapshot and any failed CI run are still current.
     value: ${{ steps.run.outputs.active }}
