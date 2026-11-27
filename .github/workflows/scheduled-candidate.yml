@@ -94,7 +94,7 @@ jobs:
       - id: threads
         if: inputs.review-pr != ''
         continue-on-error: true
-        uses: ftes/ci/review-threads@6f19156052da99a0cf42268f5d9fd19f437e6b01
+        uses: ftes/ci/review-threads@41939eef91514e8ac6b33a1d6e7923edc42f4628 # v1.0.14
         with:
           prs: ${{ inputs.review-pr }}
           authors: claude opencode-agent coderabbitai
@@ -230,7 +230,7 @@ jobs:
       - id: threads
         if: inputs.review-pr != ''
         continue-on-error: true
-        uses: ftes/ci/review-threads@6f19156052da99a0cf42268f5d9fd19f437e6b01
+        uses: ftes/ci/review-threads@41939eef91514e8ac6b33a1d6e7923edc42f4628 # v1.0.14
         env:
           REVIEW_THREADS_DIR: ${{ runner.temp }}/scheduled-review-threads
         with:
