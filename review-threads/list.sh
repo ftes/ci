@@ -6,13 +6,14 @@
 # A thread ANSWERER answered as fixed (its reaction on its last reply) but couldn't resolve is
 # resolved here. Writes to
 # $GITHUB_OUTPUT `open`, the PRs with at least one open thread, as a JSON array.
-# Env: GH_TOKEN, REPO, PRS, AUTHORS, ANSWERER, MAX_ANSWERS.
+# Env: GH_TOKEN, REPO, PRS, AUTHORS, ANSWERER, MAX_ANSWERS, optional REVIEW_THREADS_DIR.
 # shellcheck disable=SC2016 # $ in single quotes is GraphQL or jq, not shell.
 set -euo pipefail
 
-dir=tmp/review-threads
+dir=${REVIEW_THREADS_DIR:-tmp/review-threads}
 mkdir -p "$dir"
 open=()
+default_base=
 for pr in $PRS; do
   [[ $pr =~ ^[0-9]+$ ]] || { echo "::error::prs: PR numbers, got: $pr"; exit 1; }
   # The viewer is the same GitHub Actions bot that posts the reply and the reaction.
@@ -60,11 +61,31 @@ for pr in $PRS; do
           | select(.pending or (.comments[-1].author != $answerer))
           | select(.pending or ([.comments[] | select(.author == $answerer)] | length < $max))
            | {id, pending, pending_reply: (if .pending then .comments[-1].id else null end),
+              snapshot: (if .pending then (.comments[-1].body | [capture("<!-- scheduled-review-snapshot: (?<target>[^\\n]+) -->$").target] | first) else null end),
               path, line: (.line // .originalLine), outdated: .isOutdated, root: .comments[0].id,
              comments: (.comments | map({author, body: (.body | gsub("<!--[\\s\\S]*?-->"; "") | gsub("<picture>[\\s\\S]*?</picture>"; "") | .[:6000])}))})' \
       > "$dir/$pr.all.json"
   for id in $(jq -r '.[] | select(.pending) | .id' "$dir/$pr.all.json"); do
+    [[ ${RECOVER:-true} == true ]] || break
     reply=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .pending_reply' "$dir/$pr.all.json")
+    snapshot=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .snapshot // empty' "$dir/$pr.all.json")
+    if [[ -z $snapshot && ${REQUIRE_SNAPSHOT:-false} == true ]]; then
+      echo "::warning::Thread $id: prior reply has no published head; left open for a maintainer."
+      continue
+    fi
+    if [[ -n $snapshot ]]; then
+      if [[ -z $default_base ]]; then
+        if ! default_base=$(gh api "repos/$REPO" --jq '.default_branch // empty') || [[ -z $default_base ]]; then
+          echo "::warning::Thread $id: couldn't read the default branch; left open for a maintainer."
+          continue
+        fi
+      fi
+      if ! BASE="$default_base" SCHEDULED_TARGET="$snapshot" \
+        python3 -I -B "${BASH_SOURCE[0]%/*}/../opencode-scheduled/scheduled.py" check-answer; then
+        echo "::warning::Thread $id: prior fix was for a stale snapshot or the PR was taken over; left open for a maintainer."
+        continue
+      fi
+    fi
     if gh api graphql -f thread="$id" -f query='
         mutation($thread: ID!) { resolveReviewThread(input: {threadId: $thread}) { thread { isResolved } } }' > /dev/null; then
       echo "Thread $id: answered as fixed earlier, resolved now."
@@ -76,7 +97,7 @@ for pr in $PRS; do
       echo "::warning::Couldn't resolve thread $id, answered as fixed earlier."
     fi
   done
-  jq 'map(select(.pending | not) | del(.pending, .pending_reply))' "$dir/$pr.all.json" > "$dir/$pr.json"
+  jq 'map(select(.pending | not) | del(.pending, .pending_reply, .snapshot))' "$dir/$pr.all.json" > "$dir/$pr.json"
   rm "$dir/$pr.all.json"
   count=$(jq length "$dir/$pr.json")
   echo "PR $pr: $count open review threads"

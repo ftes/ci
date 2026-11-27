@@ -1,0 +1,67 @@
+name: OpenCode scheduled maintenance
+description: Run a scheduled maintenance task and publish only its validated result.
+inputs:
+  client-id:
+    description: OpenCode's public OIDC client ID.
+    required: true
+  mode:
+    description: "Scheduled operation: triage, fix, recreate, improve, or exhaust."
+    required: true
+  phase:
+    description: "Candidate phase: plan, check, or publish. Not needed for exhaustion."
+    default: ""
+  prompt:
+    description: Repository-specific maintenance instructions.
+    default: ""
+  targets:
+    description: JSON snapshots with number, branch and head for existing PRs.
+    default: "[]"
+  base:
+    description: Default branch name.
+    required: true
+  schema:
+    description: Review findings answer schema.
+    default: ""
+  base-sha:
+    description: Trusted checkout SHA for the candidate jobs.
+    default: ""
+  candidate-dir:
+    description: Directory outside the checkout for the candidate artifact.
+    default: ""
+outputs:
+  redo:
+    description: Triage's validated redo decisions.
+    value: ${{ steps.run.outputs.redo }}
+  candidate:
+    description: Whether planning produced a candidate.
+    value: ${{ steps.run.outputs.candidate }}
+  has-patch:
+    description: Whether the candidate needs project checks.
+    value: ${{ steps.run.outputs.has-patch }}
+runs:
+  using: composite
+  steps:
+    - name: Install OpenCode V2
+      if: inputs.phase == 'plan'
+      uses: ftes/ci/opencode-install@e53e22699f50c88157237931a10500d367cca47c # v1.0.13
+    - name: Authenticate OpenCode
+      id: auth
+      if: inputs.phase == 'plan'
+      uses: ftes/ci/opencode-auth@0e4b067199ea2f6a255a26ab43403f6f6acb5cb6 # v1.0.12
+      with:
+        client-id: ${{ inputs.client-id }}
+    - name: Run scheduled maintenance
+      id: run
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        OPENCODE_API_KEY: ${{ steps.auth.outputs.token }}
+        MODE: ${{ inputs.mode }}
+        PROMPT: ${{ inputs.prompt }}
+        TARGETS: ${{ inputs.targets }}
+        BASE: ${{ inputs.base }}
+        SCHEMA: ${{ inputs.schema }}
+        PHASE: ${{ inputs.phase }}
+        BASE_SHA: ${{ inputs.base-sha }}
+        CANDIDATE_DIR: ${{ inputs.candidate-dir }}
+      run: python3 -I -B "$GITHUB_ACTION_PATH/scheduled.py"

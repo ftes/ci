@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Answers a PR's open review threads (answer/action.yml) from Claude's `threads`: a reply to each,
 # and on a fixed one a temporary 👍 on the reply until the thread is resolved. Only threads list.sh wrote to
-# tmp/review-threads/<PR>.json, each once. Env: GH_TOKEN, PR, ANSWERS.
+# <PR>.json in tmp/review-threads (or REVIEW_THREADS_DIR), each once. Env: GH_TOKEN, PR, ANSWERS.
 # shellcheck disable=SC2016 # $ in single quotes is GraphQL or jq, not shell.
 set -euo pipefail
 
 [[ $PR =~ ^[0-9]+$ ]] || { echo "::error::pr: a PR number, got: $PR"; exit 1; }
-listed=tmp/review-threads/$PR.json
+listed=${REVIEW_THREADS_DIR:-tmp/review-threads}/$PR.json
 [[ -f $listed ]] || { echo "::error::No $listed: run ftes/ci/review-threads for PR $PR first."; exit 1; }
 
 # Claude's answer is data: listed threads only, a reply cut to 3000 characters, `fixed` a boolean.
@@ -18,9 +18,22 @@ answers=$(jq -c --slurpfile listed "$listed" '
   | unique_by(.id)' <<< "{}")
 
 failed=0
+# Scheduled maintenance provides the published commit and checks again at each write.
+guard() {
+  if [[ -n ${SCHEDULED_TARGET:-} ]] &&
+    ! python3 -I -B "${BASH_SOURCE[0]%/*}/../opencode-scheduled/scheduled.py" check-answer; then
+    echo "::notice::Stopped answering PR $PR: its published head or ownership could not be confirmed."
+    exit 1
+  fi
+}
 while read -r answer; do
   id=$(jq -r .id <<< "$answer")
   body=$(jq -r .reply <<< "$answer")
+  if [[ -n ${SCHEDULED_TARGET:-} ]]; then
+    snapshot=$(jq -c '{number, branch, head}' <<< "$SCHEDULED_TARGET")
+    body+=$'\n\n'"<!-- scheduled-review-snapshot: $snapshot -->"
+  fi
+  guard
   if ! reply=$(gh api graphql -f thread="$id" -f body="$body" -f query='
       mutation($thread: ID!, $body: String!) {
         addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $thread, body: $body}) { comment { id } }
@@ -31,6 +44,7 @@ while read -r answer; do
     # The reaction, not the reply's text, says the finding is fixed: a quoted text can't fake it.
     # list.sh resolves the thread on its own if that fails.
     marked=false
+    guard
     if gh api graphql -f subject="$reply" -f query='
       mutation($subject: ID!) { addReaction(input: {subjectId: $subject, content: THUMBS_UP}) { reaction { content } } }' > /dev/null; then
       marked=true
@@ -39,6 +53,7 @@ while read -r answer; do
     fi
     resolved=false
     for attempt in 1 2 3; do
+      guard
       if gh api graphql -f thread="$id" -f query='
           mutation($thread: ID!) { resolveReviewThread(input: {threadId: $thread}) { thread { isResolved } } }' > /dev/null; then
         resolved=true; break
@@ -48,6 +63,7 @@ while read -r answer; do
     if [[ $resolved == true ]]; then
       echo "Thread $id: fixed, resolved."
       if [[ $marked == true ]]; then
+        guard
         gh api graphql -f subject="$reply" -f query='
           mutation($subject: ID!) { removeReaction(input: {subjectId: $subject, content: THUMBS_UP}) { reaction { id } } }' > /dev/null ||
           echo "::warning::Couldn't remove the reaction on thread $id."
