@@ -37,8 +37,7 @@ runs:
   steps:
     - name: Install OpenCode V2
       if: inputs.mode != 'exhaust' && inputs.mode != 'prepare-fix'
-      shell: bash
-      run: npm install --global @opencode/cli@2.4.2
+      uses: ftes/ci/opencode-install@e53e22699f50c88157237931a10500d367cca47c # v1.0.13
     - name: Authenticate OpenCode
       id: auth
       if: inputs.mode != 'exhaust' && inputs.mode != 'prepare-fix'
