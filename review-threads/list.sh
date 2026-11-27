@@ -67,6 +67,10 @@ for pr in $PRS; do
   for id in $(jq -r '.[] | select(.pending) | .id' "$dir/$pr.all.json"); do
     reply=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .pending_reply' "$dir/$pr.all.json")
     snapshot=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .snapshot // empty' "$dir/$pr.all.json")
+    if [[ -z $snapshot && ${REQUIRE_SNAPSHOT:-false} == true ]]; then
+      echo "::warning::Thread $id: prior reply has no published head; left open for a maintainer."
+      continue
+    fi
     if [[ -n $snapshot ]] &&
       ! BASE="${BASE_BRANCH:-}" SCHEDULED_TARGET="$snapshot" \
         python3 -I -B "${BASH_SOURCE[0]%/*}/../opencode-scheduled/scheduled.py" check-answer; then

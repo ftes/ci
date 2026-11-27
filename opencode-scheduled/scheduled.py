@@ -75,7 +75,10 @@ def app_token():
     try:
         yield token
     finally:
-        gh("api", "--method", "DELETE", "/installation/token", "--silent", token=token)
+        try:
+            gh("api", "--method", "DELETE", "/installation/token", "--silent", token=token)
+        except subprocess.CalledProcessError:
+            print("::warning::Could not revoke the GitHub App token; publication and cleanup are separate.")
 
 
 def ref(branch):
@@ -87,14 +90,24 @@ def remote_head(branch):
     return next((entry["object"]["sha"] for entry in refs if entry["ref"] == ref(branch)), None)
 
 
-def push(branch, token, expected, source="HEAD", *, cwd=None):
+def git_auth(token):
     auth = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     print(f"::add-mask::{auth}", flush=True)
-    env = dict(os.environ, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="http.https://github.com/.extraheader",
-               GIT_CONFIG_VALUE_0=f"Authorization: Basic {auth}", GIT_TERMINAL_PROMPT="0")
+    return dict(os.environ, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="http.https://github.com/.extraheader",
+                GIT_CONFIG_VALUE_0=f"Authorization: Basic {auth}", GIT_TERMINAL_PROMPT="0")
+
+
+def push(branch, token, expected, source="HEAD", *, cwd=None):
     git("check-ref-format", ref(branch), cwd=cwd)
     git("push", f"--force-with-lease={ref(branch)}:{expected}", f"https://github.com/{REPO}.git",
-        f"{source}:{ref(branch)}", env=env, cwd=cwd)
+        f"{source}:{ref(branch)}", env=git_auth(token), cwd=cwd)
+
+
+def ensure_commit(sha):
+    try:
+        git("cat-file", "-e", f"{sha}^{{commit}}")
+    except subprocess.CalledProcessError:
+        git("fetch", "--no-tags", f"https://github.com/{REPO}.git", sha, env=git_auth(os.environ["GH_TOKEN"]))
 
 
 def text(value, limit, *, multiline=True):
@@ -163,6 +176,8 @@ def ci_failure(target):
 
 
 def check_fix(target, *, save_log=False):
+    # Classification selects a head and whether CI is failing. Each entry checks the
+    # latest attempt for that head; fix then holds that exact attempt through publication.
     pr = current(target)
     if not pr or git("rev-parse", "HEAD") != target["head"]:
         return False
@@ -284,6 +299,7 @@ def write_context(targets):
 
 
 def close(target, reason, token, *, allowed=None):
+    require(not reason.startswith("Needs a human:"), "Close reason uses the reserved takeover prefix")
     if not current(target) or (allowed is not None and not allowed()):
         return
     number = target["number"]
@@ -394,7 +410,7 @@ def fix(target, prompt):
             if re.fullmatch(UPSTREAM, branch):
                 api(f"issues/{number}/comments", token=token, method="POST", payload={"body": f"Needs a human: {reason}"})
             else:
-                close(target, reason, token)
+                close(target, reason, token, allowed=lambda: check_fix(target) == snapshot)
             return
         if decision in ("fix", "retry"):
             title = "Re-run CI" if decision == "retry" else text(result["title"], 200, multiline=False)
@@ -443,6 +459,7 @@ def publish(targets, prompt, mode):
         require(separator and saved_marker == marker and record["author"]["email"] == BOT_EMAIL
                 and [item["sha"] for item in record["parents"]] == [parent],
                 "Existing branch is not this run's validated publication")
+        ensure_commit(sha)
         validate_paths(git("diff", "--name-only", "--no-renames", "-z", parent, sha), upstream=upstream)
         if upstream:
             require(git("show", f"{sha}:DRIVER_VERSION") == version, "Driver version was not updated")

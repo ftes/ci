@@ -36,6 +36,9 @@ inputs:
   max-answers:
     description: Answers per thread before it is left to the maintainers, so two bots don't argue every night
     default: "2"
+  require-snapshot:
+    description: Leave pending replies without a published commit snapshot open for a maintainer.
+    default: "false"
 
 outputs:
   open:
@@ -57,4 +60,5 @@ runs:
         AUTHORS: ${{ inputs.authors }}
         ANSWERER: ${{ inputs.answerer }}
         MAX_ANSWERS: ${{ inputs.max-answers }}
+        REQUIRE_SNAPSHOT: ${{ inputs.require-snapshot }}
       run: bash "$GITHUB_ACTION_PATH/list.sh"
