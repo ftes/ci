@@ -12,6 +12,8 @@ per release and merges it once the repo's checks pass, so each repo's CI tests e
 | [`claude-tag`](claude-tag/action.yml) | for `@claude`: skips other repositories' and Renovate's PRs, lists maintainers' comments and the allowed `gh` commands |
 | [`claude-review`](claude-review/action.yml) | a PR review's increment since the last one, maintainers' comments and the prompt |
 | [`opencode-auth`](opencode-auth/action.yml) | exchanges the job's GitHub OIDC token for a short-lived service-account `token`; needs `id-token: write` and the service account's `client-id`; pass the output as `OPENCODE_API_KEY` to the OpenCode step |
+| [`opencode-install`](opencode-install/action.yml) | installs the pinned OpenCode V2 CLI |
+| [`opencode`](opencode/action.yml) | gates `/agent`, reconciles PR verdicts, and runs and publishes reviews and commands |
 | [`review-threads`](review-threads/action.yml) | a PR's open findings by reviewer bots, for Claude to address; [`answer`](review-threads/answer/action.yml) replies, reacts and resolves the fixed ones |
 | [`kamal-deploy`](kamal-deploy/action.yml) | Ruby and Kamal with mise, SSH with pinned host keys, `kamal deploy` |
 | [`elixir-image.yml`](.github/workflows/elixir-image.yml) | reusable: keeps the Dockerfile's hexpm/elixir image on the repo's toolchain |
@@ -30,6 +32,25 @@ Each file's header shows how to call it.
   token's claims (Hex's workload identity, Claude's token exchange).
 - **Flat.** An action here can't call another one at its own commit, so callers compose them.
 - **Small.** A need of one repo is a step next to the shared one in that repo, not a new input.
+
+## Interactive OpenCode
+
+Keep event filters, job permissions, concurrency and toolchain setup in the caller. Set the
+repository Actions variable `OPENCODE_CLIENT_ID` for model access and install the OpenCode GitHub
+App on the repository for publishing. Ignore `tmp/opencode/`, where the runner saves context.
+
+- PR review: check out with full history and `persist-credentials: false`, run `opencode` with
+  `mode: reconcile-reviews`, and switch to the PR head before local setup. Install the CLI and
+  authenticate with `opencode-auth`, then use `mode: review` and pass its `token` as `model-token`.
+- Command: run `mode: gate` before checkout or OIDC. Handle the `fork` output in a reply job.
+  When `run` is `true`, check out the default branch with full history and no persisted
+  credentials. Switch to the authorized `branch` (a remote branch for PRs, a new branch for
+  issues), run local setup, install the CLI and authenticate. Use `mode: command` with `branch`
+  and `model-token`; it rechecks authorization before running.
+
+Pass repo-specific prompt text in `guidance`. The shared runner limits OpenCode to read tools
+(plus file edits for commands) and publishes validated results through a separate App OIDC
+exchange. The model gets neither the App token nor the GitHub job token.
 
 ## Pull request CI
 

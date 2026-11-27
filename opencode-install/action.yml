@@ -1,0 +1,9 @@
+name: Install OpenCode
+description: Install the pinned OpenCode V2 CLI.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      # The CLI package and its platform packages are pinned to the same version.
+      run: npm install --global @opencode/cli@2.4.2 # zizmor: ignore[adhoc-packages]

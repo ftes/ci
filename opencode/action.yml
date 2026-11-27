@@ -1,0 +1,52 @@
+name: OpenCode interactive runner
+description: Gate a maintainer command, reconcile PR verdicts, or run and publish a review or command.
+
+inputs:
+  mode:
+    description: "One of: gate, reconcile-reviews, review, command."
+    required: true
+  branch:
+    description: The authorized branch output by gate (command mode).
+  model-token:
+    description: Short-lived OpenCode model token from opencode-auth (review and command modes).
+  guidance:
+    description: Repository-specific instructions to append to the shared prompt.
+
+outputs:
+  run:
+    description: Whether gate authorized a command.
+    value: ${{ steps.runner.outputs.run }}
+  fork:
+    description: Whether gate detected a command on a fork PR that needs a reply.
+    value: ${{ steps.runner.outputs.fork }}
+  pr:
+    description: Whether the authorized target is a PR.
+    value: ${{ steps.runner.outputs.pr }}
+  number:
+    description: The issue or PR number identified by gate.
+    value: ${{ steps.runner.outputs.number }}
+  branch:
+    description: The authorized branch name.
+    value: ${{ steps.runner.outputs.branch }}
+
+runs:
+  using: composite
+  steps:
+    - id: runner
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        GH_TOKEN: ${{ github.token }}
+        OPENCODE_API_KEY: ${{ inputs.model-token }}
+        OPENCODE_GUIDANCE: ${{ inputs.guidance }}
+        NUMBER: ${{ github.event.pull_request.number }}
+        HEAD: ${{ github.event.pull_request.head.sha }}
+        RETARGETED: ${{ github.event.action == 'edited' }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        BRANCH: ${{ inputs.branch }}
+      run: |
+        case "$MODE" in
+          gate|command) python3 -B "$GITHUB_ACTION_PATH/command.py" "$MODE" ;;
+          review|reconcile-reviews) python3 -B "$GITHUB_ACTION_PATH/run.py" "$MODE" ;;
+          *) echo "::error::Expected gate, command, review or reconcile-reviews."; exit 1 ;;
+        esac
