@@ -165,6 +165,7 @@ def result_from_events(events):
 
 
 def agent(prompt, shape, *, settings=None):
+    model = os.environ.get("OPENCODE_MODEL") or "opencode-go/kimi-k3.1-pro"
     with tempfile.TemporaryDirectory() as tmp:
         env = {key: os.environ[key] for key in SAFE_ENV if key in os.environ}
         env.update(
@@ -185,7 +186,7 @@ def agent(prompt, shape, *, settings=None):
         with events_path.open("w") as events:
             run = subprocess.run(
                 ["opencode", "--standalone", "run", "--archived", "--format", "json",
-                 "--agent", "ci", "--model", "opencode-go/kimi-k3.1-pro", message],
+                 "--agent", "ci", "--model", model, message],
                 env=env, stdout=events, check=False,
             )
         with events_path.open() as events:

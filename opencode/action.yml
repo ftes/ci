@@ -9,6 +9,8 @@ inputs:
     description: The authorized branch output by gate (command mode).
   model-token:
     description: Short-lived OpenCode model token from opencode-auth (review and command modes).
+  model:
+    description: Optional provider/model ID for review and command modes.
   guidance:
     description: Repository-specific instructions to append to the shared prompt.
 
@@ -38,6 +40,7 @@ runs:
         MODE: ${{ inputs.mode }}
         GH_TOKEN: ${{ github.token }}
         OPENCODE_API_KEY: ${{ inputs.model-token }}
+        OPENCODE_MODEL: ${{ inputs.model }}
         OPENCODE_GUIDANCE: ${{ inputs.guidance }}
         NUMBER: ${{ github.event.pull_request.number }}
         HEAD: ${{ github.event.pull_request.head.sha }}
