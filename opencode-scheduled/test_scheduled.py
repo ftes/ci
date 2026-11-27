@@ -158,7 +158,7 @@ esac
                    "unchanged": {}}
         for recover in (False, True):
             for name, change in changes.items():
-                heads = {"main": parent, branch: head if recover else None}
+                heads = {"main": parent, branch: head if recover else None, target["branch"]: target["head"]}
                 with (self.subTest(recover=recover, change=name),
                       patch.dict(scheduled.os.environ, GITHUB_RUN_ID="123", GITHUB_STEP_SUMMARY="/dev/null"),
                       patch.object(scheduled, "BASE", "main"), patch.object(scheduled, "REPO", repo),
@@ -167,8 +167,10 @@ esac
                       patch.object(scheduled, "branch_prs", return_value=[replacement] if recover else []),
                       patch.object(scheduled, "apply_patch"), patch.object(scheduled, "verify_recovery"),
                       patch.object(scheduled, "commit"),
-                      patch.object(scheduled, "push", side_effect=lambda branch, *_: heads.update({branch: head})),
-                      patch.object(scheduled, "git", side_effect=[parent, "tree" if recover else head]),
+                      patch.object(scheduled, "push",
+                                   side_effect=lambda branch, *_, source="HEAD", **kw:
+                                   heads.update({branch: head if source else None})) as push,
+                      patch.object(scheduled, "git", side_effect=[parent, "tree" if recover else head, None]),
                       patch.object(scheduled, "app_token", return_value=nullcontext("app")),
                       patch.object(scheduled, "api") as api):
                     api.side_effect = [
@@ -179,6 +181,8 @@ esac
                     api.assert_any_call("pulls/3", token="app")
                     writes = [call for call in api.call_args_list if call.kwargs.get("method") == "PATCH"]
                     self.assertEqual([call.args for call in writes], [] if change else [("pulls/2",)])
+                    deletes = [call.args for call in push.call_args_list if call.kwargs.get("source") == ""]
+                    self.assertEqual(deletes, [] if change else [(target["branch"], "app", target["head"])])
 
     def test_ci_ignores_other_heads_and_uses_only_the_latest_attempt(self):
         target = {"number": 2, "branch": "opencode/nightly-1", "head": "a" * 40}
@@ -201,6 +205,21 @@ esac
             self.assertEqual(api.call_count, 2)
             self.assertEqual(api.call_args.kwargs["method"], "POST")
 
+    def test_triage_uses_leased_cleanup_and_checks_the_default_branch(self):
+        target = {"number": 2, "branch": "opencode/nightly-1", "head": "a" * 40}
+        result = {"close": [{"number": 2, "why": "Obsolete."}], "redo": []}
+        parent = "b" * 40
+        with (patch.object(scheduled, "git", return_value=parent),
+              patch.object(scheduled, "remote_head", return_value=parent) as ref,
+              patch.object(scheduled, "app_token", return_value=nullcontext("app")),
+              patch.object(scheduled, "close_nightly") as close, patch.object(scheduled, "output")):
+            scheduled.triage([target], result)
+            self.assertEqual(close.call_args.args, (target, "Obsolete.", "app"))
+            allowed = close.call_args.kwargs["allowed"]
+            self.assertTrue(allowed())
+            ref.return_value = "c" * 40
+            self.assertFalse(allowed())
+
     def test_only_listed_findings_may_be_answered(self):
         result = {"threads": [{"id": "known", "fixed": True, "reply": "Fixed."}]}
         scheduled.validate_answers(result, [{"id": "known"}])
@@ -220,6 +239,22 @@ esac
             scheduled.accept_fix("skip", answers, listed, target, changed=True)
         with self.assertRaisesRegex(ValueError, "budget is exhausted"):
             scheduled.accept_fix("fix", answers, listed, target, changed=True)
+
+    def test_answer_only_requires_the_same_successful_ci_attempt_at_publication(self):
+        target = {"number": 2, "branch": "opencode/nightly-1", "head": "a" * 40,
+                  "answer_only": True, "failing": False}
+        run = {"status": "completed", "conclusion": "success", "id": 10, "run_attempt": 2}
+        result = {"decision": "skip", "answers": {"threads": [{"id": "known", "fixed": True, "reply": "Fixed."}]}}
+        for latest in (None, run | {"status": "queued", "conclusion": None},
+                       run | {"conclusion": "failure"}, run | {"run_attempt": 3}, run):
+            with (self.subTest(latest=latest),
+                  patch.object(scheduled, "current", return_value={"commits": 3}),
+                  patch.object(scheduled, "git", return_value=target["head"]),
+                  patch.object(scheduled, "latest_ci_run", side_effect=[run, latest]),
+                  patch.object(scheduled, "findings_manifest", return_value=[{"id": "known"}]),
+                  patch.object(scheduled, "publish_answers") as publish):
+                scheduled.fix(target, result, None, [10, 2])
+                self.assertEqual(publish.called, latest == run)
 
     def test_answers_cannot_request_takeover(self):
         listed = [{"id": "known"}]

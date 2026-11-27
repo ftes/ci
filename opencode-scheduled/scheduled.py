@@ -154,7 +154,7 @@ def current(target, *, state="open"):
     return pr
 
 
-def ci_failure(target):
+def latest_ci_run(target):
     query = urlencode({"branch": target["branch"], "head_sha": target["head"],
                        "event": "pull_request", "per_page": 100})
     runs = api(f"actions/workflows/ci.yml/runs?{query}")["workflow_runs"]
@@ -162,10 +162,18 @@ def ci_failure(target):
                 and run["head_sha"] == target["head"]
                 and (not run["pull_requests"] or any(pr["number"] == target["number"]
                                                     for pr in run["pull_requests"]))]
-    latest = max(matching, key=lambda run: run["run_number"], default=None)
-    if latest and latest["status"] == "completed" and latest["conclusion"] in FAILURES:
-        return latest["id"], latest["run_attempt"]
+    return max(matching, key=lambda run: run["run_number"], default=None)
+
+
+def ci_attempt(target, conclusions):
+    run = latest_ci_run(target)
+    if run and run["status"] == "completed" and run["conclusion"] in conclusions:
+        return run["id"], run["run_attempt"]
     return None
+
+
+def ci_failure(target):
+    return ci_attempt(target, FAILURES)
 
 
 def check_fix(target, *, log_dir=None):
@@ -176,6 +184,8 @@ def check_fix(target, *, log_dir=None):
         return False
     if re.fullmatch(NIGHTLY, target["branch"]) and pr["commits"] >= 3 and not target.get("answer_only"):
         return False
+    if target.get("answer_only"):
+        return ci_attempt(target, {"success"}) if not target["failing"] else False
     failure = ci_failure(target)
     if bool(failure) != target["failing"]:
         return False
@@ -293,7 +303,7 @@ def close_nightly(target, reason, token, *, allowed):
         return
     if remote_head(branch) != head:
         return
-    # Exhaustion runs without a checkout. A temporary bare repo can send the leased delete.
+    # Some callers run without a checkout. A temporary bare repo can send the leased delete.
     with tempfile.TemporaryDirectory() as repository:
         git("init", "--quiet", "--bare", repository)
         try:
@@ -323,7 +333,7 @@ def triage(targets, result):
     if verdicts["close"]:
         with app_token() as token:
             for target, reason in verdicts["close"]:
-                close(target, reason, token, allowed=lambda: remote_head(BASE) == parent)
+                close_nightly(target, reason, token, allowed=lambda: remote_head(BASE) == parent)
     output("redo", [target | {"why": why, "base": parent} for target, why in verdicts["redo"]
                     if remote_head(BASE) == parent and current(target)])
 
@@ -616,8 +626,8 @@ def publish(targets, mode, result, patch):
                 replacement = api(f"pulls/{pr['number']}", token=token)
                 return replacement["state"] == "open" and published_pr_matches(replacement, branch, sha, parent)
 
-            close(target, f"Redone on current {BASE}; replaced by {pr['html_url']}.", token,
-                  allowed=replacement_current)
+            close_nightly(target, f"Redone on current {BASE}; replaced by {pr['html_url']}.", token,
+                          allowed=replacement_current)
 
 
 def nightly_open():
