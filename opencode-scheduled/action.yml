@@ -5,10 +5,10 @@ inputs:
     description: OpenCode's public OIDC client ID.
     required: true
   mode:
-    description: Scheduled operation: triage, fix, recreate, improve, or exhaust.
+    description: "Scheduled operation: triage, fix, recreate, improve, or exhaust."
     required: true
   phase:
-    description: Candidate phase: plan, check, or publish. Not needed for exhaustion.
+    description: "Candidate phase: plan, check, or publish. Not needed for exhaustion."
     default: ""
   prompt:
     description: Repository-specific maintenance instructions.
