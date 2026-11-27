@@ -1,11 +1,75 @@
+import json
+from contextlib import chdir, nullcontext
+from pathlib import Path
+import tempfile
 import unittest
-from contextlib import nullcontext
 from unittest.mock import patch
 
 import scheduled
 
 
 class ScheduledTest(unittest.TestCase):
+    def test_improvement_model_has_no_shell_or_project_integrations(self):
+        def run(*args, **options):
+            settings = json.loads(options["env"]["OPENCODE_CONFIG_CONTENT"])
+            self.assertFalse(settings["lsp"])
+            self.assertFalse(settings["formatter"])
+            self.assertEqual(options["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"], "1")
+            self.assertNotIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", options["env"])
+            allowed = {rule["action"] for rule in settings["permissions"] if rule["effect"] == "allow"}
+            self.assertEqual(allowed, {"read", "glob", "grep", "edit"})
+            self.assertEqual({rule["action"] for rule in settings["policies"]},
+                             {"plugin.use", "mcp.use", "skill.use"})
+            options["stdout"].write('{"type":"text","part":{"text":"{}"}}\n'
+                                    '{"type":"step_finish","part":{"reason":"stop"}}\n')
+            return unittest.mock.Mock()
+
+        with patch.object(scheduled.subprocess, "run", side_effect=run):
+            self.assertEqual(scheduled.agent("Improve", "{}", "improve", source=Path(".")), {})
+
+    def test_improvement_artifact_is_a_patch_applied_to_a_fresh_index(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo, candidate = root / "repo", root / "candidate"
+            repo.mkdir()
+            with chdir(repo):
+                scheduled.git("init", "--quiet")
+                (repo / "lib").mkdir()
+                source = repo / "lib" / "file.ex"
+                source.write_text("old\n")
+                scheduled.git("add", "lib/file.ex")
+                scheduled.git("-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                              "-c", "commit.gpgsign=false", "commit", "-m", "Base")
+                parent = scheduled.git("rev-parse", "HEAD")
+
+                def edit(*args, source):
+                    self.assertFalse((source / ".git").exists())
+                    (source / "lib" / "file.ex").write_text("new\n")
+                    return {"decision": "publish", "title": "Simplify source", "body": "Change source."}
+
+                with (patch.object(scheduled, "agent", side_effect=edit),
+                      patch.object(scheduled, "output")):
+                    scheduled.plan_improvement(parent, "Improve", candidate)
+                self.assertEqual(scheduled.git("status", "--porcelain"), "")
+                (candidate / ".git").mkdir()
+                with self.assertRaisesRegex(ValueError, "Unexpected candidate contents"):
+                    scheduled.apply_improvement(candidate)
+                (candidate / ".git").rmdir()
+                result = scheduled.apply_improvement(candidate)
+                self.assertEqual(result["title"], "Simplify source")
+                self.assertEqual(scheduled.git("show", ":lib/file.ex"), "new")
+                self.assertEqual(source.read_text(), "old\n")
+
+    def test_improvement_rejects_git_metadata_and_symlinks(self):
+        for diff in (
+            ":000000 100644 0000000 1234567 A\0lib/.gitattributes\0",
+            ":000000 120000 0000000 1234567 A\0lib/link\0",
+            ":000000 100644 0000000 1234567 A\0.github/workflows/nightly.yml\0",
+        ):
+            with self.subTest(diff=diff), patch.object(scheduled, "git", return_value=diff):
+                with self.assertRaisesRegex(ValueError, "only change regular source and test files"):
+                    scheduled.improvement_patch_paths("--cached")
+
     def test_ci_ignores_other_heads_and_uses_only_the_latest_attempt(self):
         target = {"number": 2, "branch": "opencode/nightly-1", "head": "a" * 40}
         run = {"head_repository": {"full_name": "owner/project"}, "head_sha": target["head"],

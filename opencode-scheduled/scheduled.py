@@ -2,12 +2,14 @@
 
 import base64
 import contextlib
+import io
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -197,17 +199,20 @@ def rule(action, resource="*", effect="allow"):
     return {"action": action, "resource": resource, "effect": effect}
 
 
-def agent(prompt, shape, mode):
+def agent(prompt, shape, mode, *, source=None):
+    tools = ("read", "glob", "grep", "edit") if source else ("read", "glob", "grep")
     writable = mode != "triage"
-    rules = [rule("*", effect="deny"), *(rule(tool) for tool in ("read", "glob", "grep")),
+    rules = [rule("*", effect="deny"), *(rule(tool) for tool in tools),
              rule("external_directory", effect="deny")]
-    if writable:
+    if writable and not source:
         rules.extend([rule("edit"), rule("external_directory", "$HOME/.cache/playwright/*")])
-    if mode != "fix" or "upstream/" in os.environ.get("TARGETS", ""):
+    if not source and (mode != "fix" or "upstream/" in os.environ.get("TARGETS", "")):
         rules.append(rule("subagent"))
     for tool in ("read", "edit"):
         for path in (".git", ".git/*", ".github/*", ".opencode/*", "*.env", "*.env.*"):
             rules.append(rule(tool, path, "deny"))
+    if source:
+        rules.extend(rule("edit", path, "deny") for path in (".gitattributes", "**/.gitattributes"))
     commands = ["git status *", "git diff *", "git log *", "git show *"]
     if writable:
         commands += ["mix format *", "mix compile *", "mix credo *", "mix test *",
@@ -217,7 +222,8 @@ def agent(prompt, shape, mode):
         commands += ["mix usage_rules.sync --yes", "env PW_UNSKIP=env,flaky mix test *"]
         upstream_source = Path("tmp/opencode-upstream").resolve()
         commands += [f"git -C {upstream_source} {command} *" for command in ("diff", "show", "log")]
-    rules.extend(rule("shell", command) for command in commands)
+    if not source:
+        rules.extend(rule("shell", command) for command in commands)
     config = {
         "share": "disabled", "formatter": False, "lsp": False, "snapshots": False,
         "permissions": rules,
@@ -237,7 +243,7 @@ def agent(prompt, shape, mode):
         with tempfile.TemporaryFile(mode="w+") as events:
             run = subprocess.run(["opencode", "--standalone", "run", "--archived", "--format", "json",
                                   "--agent", "ci", "--model", "opencode-go/kimi-k3.1-pro", message],
-                                 stdout=events, env=env)
+                                  stdout=events, env=env, cwd=source)
             run.check_returncode()
             events.seek(0)
             chunks, stopped = [], False
@@ -447,7 +453,70 @@ def branch_prs(branch, token=None):
             if (pr["head"]["repo"] or {}).get("full_name") == REPO]
 
 
-def publish(targets, prompt, mode):
+def improvement_patch_paths(*revisions, env=None):
+    changes = git("diff", "--raw", "--no-renames", "-z", *revisions, env=env)
+    require(changes, "No improvement to publish")
+    entries = changes.rstrip("\0").split("\0")
+    for header, name in zip(entries[::2], entries[1::2], strict=True):
+        old_mode, new_mode, *_ = header.removeprefix(":").split()
+        require(name.startswith(("lib/", "test/")) and not protected(name)
+                and not set(Path(name).parts).intersection({".git", ".gitattributes", ".gitmodules"})
+                and {old_mode, new_mode} <= {"000000", "100644", "100755"},
+                "Improvement may only change regular source and test files")
+
+
+def plan_improvement(parent, prompt, candidate):
+    # Export the pinned tree without Git metadata. No repo command runs in the model job.
+    archive = subprocess.check_output(["git", "archive", "--format=tar", parent])
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        source = root / "source"
+        source.mkdir()
+        with tarfile.open(fileobj=io.BytesIO(archive)) as files:
+            files.extractall(source, filter="data")
+        result = agent(
+            f"{prompt}\nEdit regular files under lib/ or test/. The next job runs checks; do not run commands.",
+            '{"decision":"publish|skip","title":"PR title","body":"PR body"}', "improve", source=source,
+        )
+        require(type(result) is dict and result["decision"] in ("publish", "skip"), "Invalid improvement result")
+        if result["decision"] == "skip":
+            return
+        title, body = text(result["title"], 200, multiline=False), text(result["body"], 12000)
+        # Stage in a separate index the model never sees, using the untouched checkout's Git config.
+        env = dict(os.environ, GIT_DIR=git("rev-parse", "--absolute-git-dir"), GIT_WORK_TREE=str(source),
+                   GIT_INDEX_FILE=str(root / "index"), GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+        git("read-tree", parent, env=env)
+        git("-c", "core.fsmonitor=false", "add", "-A", env=env)
+        improvement_patch_paths("--cached", env=env)
+        patch = subprocess.check_output(
+            ["git", "diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv"], env=env,
+        )
+        candidate.mkdir()
+        (candidate / "patch").write_bytes(patch)
+        (candidate / "pr.json").write_text(json.dumps({"title": title, "body": body}))
+    output("candidate", True)
+
+
+def apply_improvement(candidate, *, worktree=False):
+    require(candidate.is_dir() and not candidate.is_symlink()
+            and set(path.name for path in candidate.iterdir()) == {"patch", "pr.json"},
+            "Unexpected candidate contents")
+    patch, manifest = candidate / "patch", candidate / "pr.json"
+    for file, limit in ((patch, 2_000_000), (manifest, 100_000)):
+        require(file.is_file() and not file.is_symlink() and 0 < file.stat().st_size <= limit,
+                "Invalid candidate file")
+    result = json.loads(manifest.read_text())
+    require(type(result) is dict and result.keys() == {"title", "body"}, "Invalid candidate PR metadata")
+    title, body = text(result["title"], 200, multiline=False), text(result["body"], 12000)
+    require(not git("status", "--porcelain"), "Expected a clean checkout for the improvement")
+    # Applying to the index in the publisher keeps candidate files out of its worktree.
+    git("-c", "core.fsmonitor=false", "apply", "--index" if worktree else "--cached", "--whitespace=nowarn",
+        str(patch))
+    improvement_patch_paths("--cached")
+    return {"decision": "publish", "title": title, "body": body}
+
+
+def publish(targets, prompt, mode, *, candidate=None):
     target = targets[0] if targets else None
     version = os.environ["VERSION"]
     upstream = mode == "upstream"
@@ -480,6 +549,8 @@ def publish(targets, prompt, mode):
                 "Existing branch is not this run's validated publication")
         ensure_commit(sha)
         validate_paths(git("diff", "--name-only", "--no-renames", "-z", parent, sha), upstream=upstream)
+        if candidate:
+            improvement_patch_paths(parent, sha)
         if upstream:
             require(git("show", f"{sha}:DRIVER_VERSION") == version, "Driver version was not updated")
     else:
@@ -488,8 +559,9 @@ def publish(targets, prompt, mode):
         context = write_context(targets) if targets else ""
         if upstream:
             context += f"\nThe local upstream tags are in {Path('tmp/opencode-upstream').resolve()}."
-        result = agent(f"{prompt}\n{context}\nBase: {BASE}.",
-                       '{"decision":"publish|give-up|skip","title":"PR title","body":"PR body or reason"}', mode)
+        result = (apply_improvement(candidate) if candidate else
+                  agent(f"{prompt}\n{context}\nBase: {BASE}.",
+                        '{"decision":"publish|give-up|skip","title":"PR title","body":"PR body or reason"}', mode))
         decision = result["decision"]
         require(decision in ("publish", "give-up", "skip"), "Invalid publication decision")
         if decision == "skip":
@@ -501,7 +573,8 @@ def publish(targets, prompt, mode):
                     close(target, body, token, allowed=lambda: remote_head(BASE) == parent)
             return
         title = f"Update to Playwright {version}" if upstream else text(result["title"], 200, multiline=False)
-        require(stage(parent, upstream=upstream), "No changes to publish")
+        if not candidate:
+            require(stage(parent, upstream=upstream), "No changes to publish")
         if upstream:
             require(Path("DRIVER_VERSION").read_text().strip() == version, "Driver version was not updated")
         commit(title, f"{body}\n\n{marker}", parent)
@@ -560,7 +633,20 @@ def main():
     for target in targets:
         validate_target(target)
     prompt = os.environ["PROMPT"]
-    if mode == "triage":
+    if mode in ("plan-improve", "verify-improve", "publish-improve"):
+        parent = os.environ["BASE_SHA"]
+        require(not targets and not os.environ["VERSION"] and re.fullmatch(HEX_SHA, parent)
+                and git("rev-parse", "HEAD") == parent, "Unexpected improvement inputs or base")
+        candidate = Path(os.environ["CANDIDATE_DIR"])
+        require(candidate.is_absolute() and candidate.parent == Path(os.environ["RUNNER_TEMP"]),
+                "Expected a candidate directory directly under the runner temporary directory")
+        if mode == "plan-improve":
+            plan_improvement(parent, prompt, candidate)
+        elif mode == "verify-improve":
+            apply_improvement(candidate, worktree=True)
+        else:
+            publish([], "", "improve", candidate=candidate)
+    elif mode == "triage":
         triage(targets, prompt)
     elif mode == "prepare-fix":
         output("active", bool(check_fix(targets[0], save_log=True)))

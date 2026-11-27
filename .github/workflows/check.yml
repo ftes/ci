@@ -25,6 +25,7 @@ jobs:
       - run: zizmor --persona=regular --format=github .
         env:
           GH_TOKEN: ${{ github.token }}
+      - run: python3 -B -m unittest discover -s opencode-scheduled
       # The actions' scripts; actionlint checks only the workflows' run blocks.
       - run: shellcheck claude-review/*.sh review-threads/*.sh
 

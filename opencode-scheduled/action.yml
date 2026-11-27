@@ -5,7 +5,7 @@ inputs:
     description: OpenCode's public OIDC client ID.
     required: true
   mode:
-    description: "One of triage, fix, recreate, improve, exhaust, prepare-fix, or upstream."
+    description: Scheduled operation, including plan-improve, verify-improve and publish-improve.
     required: true
   prompt:
     description: Repository-specific maintenance instructions.
@@ -22,6 +22,12 @@ inputs:
   version:
     description: Upstream driver version for a new port.
     default: ""
+  base-sha:
+    description: Trusted checkout SHA for the isolated improvement jobs.
+    default: ""
+  candidate-dir:
+    description: Directory outside the checkout for the isolated improvement artifact.
+    default: ""
 outputs:
   redo:
     description: Triage's validated redo decisions.
@@ -29,15 +35,18 @@ outputs:
   active:
     description: Whether the fix snapshot and any failed CI run are still current.
     value: ${{ steps.run.outputs.active }}
+  candidate:
+    description: Whether planning produced an improvement artifact.
+    value: ${{ steps.run.outputs.candidate }}
 runs:
   using: composite
   steps:
     - name: Install OpenCode V2
-      if: inputs.mode != 'exhaust' && inputs.mode != 'prepare-fix'
+      if: "!contains(fromJSON('[\"exhaust\", \"prepare-fix\", \"verify-improve\", \"publish-improve\"]'), inputs.mode)"
       uses: ftes/ci/opencode-install@e53e22699f50c88157237931a10500d367cca47c # v1.0.13
     - name: Authenticate OpenCode
       id: auth
-      if: inputs.mode != 'exhaust' && inputs.mode != 'prepare-fix'
+      if: "!contains(fromJSON('[\"exhaust\", \"prepare-fix\", \"verify-improve\", \"publish-improve\"]'), inputs.mode)"
       uses: ftes/ci/opencode-auth@0e4b067199ea2f6a255a26ab43403f6f6acb5cb6 # v1.0.12
       with:
         client-id: ${{ inputs.client-id }}
@@ -53,4 +62,6 @@ runs:
         BASE: ${{ inputs.base }}
         SCHEMA: ${{ inputs.schema }}
         VERSION: ${{ inputs.version }}
+        BASE_SHA: ${{ inputs.base-sha }}
+        CANDIDATE_DIR: ${{ inputs.candidate-dir }}
       run: python3 -I -B "$GITHUB_ACTION_PATH/scheduled.py"
