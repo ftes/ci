@@ -49,13 +49,14 @@ class ScheduledTest(unittest.TestCase):
 
                 with (patch.object(scheduled, "agent", side_effect=edit),
                       patch.object(scheduled, "output")):
-                    scheduled.plan_improvement(parent, "Improve", candidate)
+                    scheduled.plan_candidate(parent, "improve", [], "Improve", candidate)
                 self.assertEqual(scheduled.git("status", "--porcelain"), "")
                 (candidate / ".git").mkdir()
                 with self.assertRaisesRegex(ValueError, "Unexpected candidate contents"):
-                    scheduled.apply_improvement(candidate)
+                    scheduled.read_candidate(candidate)
                 (candidate / ".git").rmdir()
-                result = scheduled.apply_improvement(candidate)
+                result, ci, patch_file = scheduled.read_candidate(candidate)
+                scheduled.apply_patch(patch_file, "improve")
                 self.assertEqual(result["title"], "Simplify source")
                 self.assertEqual(scheduled.git("show", ":lib/file.ex"), "new")
                 self.assertEqual(source.read_text(), "old\n")
@@ -67,8 +68,34 @@ class ScheduledTest(unittest.TestCase):
             ":000000 100644 0000000 1234567 A\0.github/workflows/nightly.yml\0",
         ):
             with self.subTest(diff=diff), patch.object(scheduled, "git", return_value=diff):
-                with self.assertRaisesRegex(ValueError, "only change regular source and test files"):
-                    scheduled.improvement_patch_paths("--cached")
+                with self.assertRaisesRegex(ValueError, "only change regular source"):
+                    scheduled.candidate_paths("improve", "--cached")
+
+    def test_recovery_requires_the_exact_checked_artifact(self):
+        branch, parent = "opencode/nightly-123", "a" * 40
+        title, body = "Simplify", "Explain."
+        message = f"{body}\n\nOpenCode-Scheduled: {branch} {parent}"
+        record = {"message": f"{title}\n\n{message}\n", "author": {"email": scheduled.BOT_EMAIL},
+                  "parents": [{"sha": parent}], "tree": {"sha": "checked-tree"}}
+        result = {"decision": "publish", "title": title, "body": body}
+        with (patch.dict(scheduled.os.environ, GITHUB_RUN_ID="123", GITHUB_STEP_SUMMARY="/dev/null"),
+              patch.object(scheduled, "BASE", "main"),
+              patch.object(scheduled, "remote_head", side_effect=lambda ref: parent if ref == "main" else "pushed"),
+              patch.object(scheduled, "branch_prs", return_value=[]),
+              patch.object(scheduled, "nightly_open", return_value=0),
+              patch.object(scheduled, "git", side_effect=[parent, "different-tree", parent, "checked-tree"]),
+              patch.object(scheduled, "api", return_value=record) as api,
+              patch.object(scheduled, "app_token", return_value=nullcontext("app")) as token,
+              patch.object(scheduled, "require_published_pr"),
+              patch.object(scheduled, "apply_patch") as applied):
+            with self.assertRaisesRegex(ValueError, "does not match the checked candidate"):
+                scheduled.publish([], "improve", result, Path("candidate-b.patch"))
+            applied.assert_called_once_with(Path("candidate-b.patch"), "improve")
+            token.assert_not_called()
+            api.side_effect = [record, {"html_url": "https://example.invalid/pr"}]
+            scheduled.publish([], "improve", result, Path("candidate-a.patch"))
+            applied.assert_called_with(Path("candidate-a.patch"), "improve")
+            self.assertEqual(api.call_args.kwargs["method"], "POST")
 
     def test_ci_ignores_other_heads_and_uses_only_the_latest_attempt(self):
         target = {"number": 2, "branch": "opencode/nightly-1", "head": "a" * 40}
@@ -146,13 +173,10 @@ class ScheduledTest(unittest.TestCase):
         target = {"number": 2, "branch": "opencode/nightly-1", "head": "a" * 40, "failing": True}
         result = {"decision": "give-up", "reason": "Needs redesign.", "answers": {"threads": []}}
         with (patch.object(scheduled, "check_fix", return_value=(10, 2)) as check,
-              patch.object(scheduled, "write_context", return_value=""),
-              patch.object(scheduled, "agent", return_value=result),
-              patch.object(scheduled, "stage", return_value=False),
               patch.dict(scheduled.os.environ, SCHEMA=""),
               patch.object(scheduled, "app_token", return_value=nullcontext("app")),
               patch.object(scheduled, "close_nightly") as close):
-            scheduled.fix(target, "Fix the PR.")
+            scheduled.fix(target, result, None, [10, 2])
             self.assertEqual(close.call_args.args, (target, result["reason"], "app"))
             allowed = close.call_args.kwargs["allowed"]
             self.assertTrue(allowed())

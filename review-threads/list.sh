@@ -66,6 +66,7 @@ for pr in $PRS; do
              comments: (.comments | map({author, body: (.body | gsub("<!--[\\s\\S]*?-->"; "") | gsub("<picture>[\\s\\S]*?</picture>"; "") | .[:6000])}))})' \
       > "$dir/$pr.all.json"
   for id in $(jq -r '.[] | select(.pending) | .id' "$dir/$pr.all.json"); do
+    [[ ${RECOVER:-true} == true ]] || break
     reply=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .pending_reply' "$dir/$pr.all.json")
     snapshot=$(jq -r --arg id "$id" '.[] | select(.id == $id) | .snapshot // empty' "$dir/$pr.all.json")
     if [[ -z $snapshot && ${REQUIRE_SNAPSHOT:-false} == true ]]; then
