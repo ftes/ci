@@ -27,6 +27,9 @@ on:
       review-pr:
         default: ""
         type: string
+      upstream-repair:
+        default: false
+        type: boolean
       prompt:
         required: true
         type: string
@@ -40,7 +43,39 @@ env:
   MIX_ENV: test
 
 jobs:
+  prepare-upstream:
+    if: inputs.upstream-repair
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.checkout-sha }}
+          persist-credentials: false
+      - uses: ftes/ci/opencode-scheduled@2d82bb9636840b1ec82f849b58508295a7678c5a
+        with:
+          phase: prepare-upstream
+          mode: ${{ inputs.mode }}
+          client-id: ${{ inputs.client-id }}
+          base: ${{ inputs.base }}
+          base-sha: ${{ inputs.checkout-sha }}
+          targets: ${{ inputs.targets }}
+          upstream-repair: true
+      - id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scheduled-upstream-${{ inputs.key }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/scheduled-upstream/source.tar
+          if-no-files-found: error
+          retention-days: 7
+
   plan:
+    needs: prepare-upstream
+    if: ${{ !cancelled() && (!inputs.upstream-repair || needs.prepare-upstream.result == 'success') }}
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 60
     permissions:
@@ -64,8 +99,14 @@ jobs:
           prs: ${{ inputs.review-pr }}
           authors: claude opencode-agent coderabbitai
           recover: false
+      - if: inputs.upstream-repair
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.prepare-upstream.outputs.artifact }}
+          path: ${{ runner.temp }}/scheduled-upstream
+          merge-multiple: true
       - id: plan
-        uses: ftes/ci/opencode-scheduled@6f19156052da99a0cf42268f5d9fd19f437e6b01
+        uses: ftes/ci/opencode-scheduled@2d82bb9636840b1ec82f849b58508295a7678c5a
         with:
           phase: plan
           mode: ${{ inputs.mode }}
@@ -76,6 +117,7 @@ jobs:
           schema: ${{ steps.threads.outcome == 'success' && steps.threads.outputs.schema || '' }}
           candidate-dir: ${{ runner.temp }}/scheduled-candidate
           prompt: ${{ inputs.prompt }}
+          upstream-repair: ${{ inputs.upstream-repair }}
       - id: upload
         if: steps.plan.outputs.candidate == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -114,7 +156,7 @@ jobs:
           artifact-ids: ${{ needs.plan.outputs.artifact }}
           path: ${{ runner.temp }}/scheduled-candidate
           merge-multiple: true
-      - uses: ftes/ci/opencode-scheduled@6f19156052da99a0cf42268f5d9fd19f437e6b01
+      - uses: ftes/ci/opencode-scheduled@2d82bb9636840b1ec82f849b58508295a7678c5a
         with:
           phase: check
           mode: ${{ inputs.mode }}
@@ -123,6 +165,7 @@ jobs:
           base-sha: ${{ inputs.checkout-sha }}
           targets: ${{ inputs.targets }}
           candidate-dir: ${{ runner.temp }}/scheduled-candidate
+          upstream-repair: ${{ inputs.upstream-repair }}
       - uses: ftes/ci/setup@0e4b067199ea2f6a255a26ab43403f6f6acb5cb6 # v1.0.12
       - if: github.repository == 'ftes/fluffy' && inputs.mode == 'fix'
         uses: ftes/ci/playwright-browser@0e4b067199ea2f6a255a26ab43403f6f6acb5cb6 # v1.0.12
@@ -195,7 +238,7 @@ jobs:
           authors: claude opencode-agent coderabbitai
           require-snapshot: true
       - id: publish
-        uses: ftes/ci/opencode-scheduled@6f19156052da99a0cf42268f5d9fd19f437e6b01
+        uses: ftes/ci/opencode-scheduled@2d82bb9636840b1ec82f849b58508295a7678c5a
         env:
           REVIEW_THREADS_DIR: ${{ runner.temp }}/scheduled-review-threads
         with:
@@ -207,3 +250,4 @@ jobs:
           targets: ${{ inputs.targets }}
           schema: ${{ steps.threads.outcome == 'success' && steps.threads.outputs.schema || '' }}
           candidate-dir: ${{ runner.temp }}/scheduled-candidate
+          upstream-repair: ${{ inputs.upstream-repair }}
